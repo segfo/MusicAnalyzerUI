@@ -109,6 +109,8 @@ pub struct VisualizationPageState {
     pub loop_active: RwSignal<bool>,
     /// Ctrl+クリックで選択されたセグメントインデックス（トラック依存）
     pub selected_segment_indices: RwSignal<Vec<u32>>,
+    /// セクションリストのハイライト表示フラグ
+    pub highlight_enabled: RwSignal<bool>,
 }
 
 impl VisualizationPageState {
@@ -121,6 +123,7 @@ impl VisualizationPageState {
             loop_end:                 create_rw_signal(None::<f64>),
             loop_active:              create_rw_signal(false),
             selected_segment_indices: create_rw_signal(Vec::<u32>::new()),
+            highlight_enabled:        create_rw_signal(false),
         }
     }
 

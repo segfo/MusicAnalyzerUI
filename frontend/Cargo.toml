@@ -23,6 +23,7 @@ features = [
   "HtmlElement",
   "HtmlInputElement",
   "HtmlSelectElement",
+  "Document",
   "Element",
   "Event",
   "EventTarget",

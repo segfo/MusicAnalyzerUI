@@ -275,17 +275,16 @@ pub fn Analysis() -> impl IntoView {
                                 <Timeline track=track_for_timeline />
 
                                 // Main content + sidebar
-                                <div class="flex flex-1 min-h-0 overflow-hidden">
+                                <div class="relative flex flex-1 min-h-0 overflow-hidden">
                                     <div class="flex-1 overflow-y-auto p-6">
                                         <AnalysisContent track=track viz_href=viz_href />
                                     </div>
                                     <div class="w-64 flex-shrink-0 bg-gray-900 border-l border-gray-800 p-3 overflow-y-auto">
                                         <StemMixer />
                                     </div>
+                                    // SectionCard はスクロール対象外の外側コンテナに配置
+                                    <SectionCard track=track_for_card />
                                 </div>
-
-                                // Floating section card (bottom-right)
-                                <SectionCard track=track_for_card />
                             }.into_view()
                         },
                         Err(e) => view! {
@@ -324,7 +323,7 @@ fn AnalysisContent(track: TrackDataset, viz_href: String) -> impl IntoView {
     let seg_count = track.segments.len().to_string();
 
     // Filter out Start/End segments for display
-    let filtered_segments: Vec<SegmentResult> = track
+    let filtered_segments: Vec<(usize, SegmentResult)> = track
         .segments
         .iter()
         .filter(|seg| {
@@ -332,7 +331,19 @@ fn AnalysisContent(track: TrackDataset, viz_href: String) -> impl IntoView {
             label_lower != "start" && label_lower != "end"
         })
         .cloned()
+        .enumerate()
         .collect();
+
+    let ctx = use_context::<PlaybackContext>().expect("PlaybackContext missing");
+    let viz_page_state = use_context::<VisualizationPageState>().expect("VisualizationPageState missing");
+    let highlight_enabled = viz_page_state.highlight_enabled.read_only();
+    let set_highlight_enabled = viz_page_state.highlight_enabled.write_only();
+    let segments_sv = store_value(track.segments.clone());
+    let active_seg_index: Memo<Option<usize>> = create_memo(move |_| {
+        ctx.current_segment_idx
+            .get()
+            .and_then(|i| segments_sv.get_value().get(i).map(|s| s.index as usize))
+    });
 
     view! {
         <div class="max-w-4xl mx-auto">
@@ -349,12 +360,23 @@ fn AnalysisContent(track: TrackDataset, viz_href: String) -> impl IntoView {
             </div>
 
             // Section list (filter out Start/End segments)
-            <h3 class="text-sm font-medium text-gray-400 uppercase tracking-wider mb-3">"Sections"</h3>
+            <div class="flex items-center justify-between mb-3">
+                <h3 class="text-sm font-medium text-gray-400 uppercase tracking-wider">"Sections"</h3>
+                // ハイライト有効化ボタン
+                <button
+                    on:click=move |_| set_highlight_enabled.update(|v| *v = !*v)
+                    class=move || if highlight_enabled.get() {
+                        "text-xs px-2 py-0.5 rounded bg-blue-500/20 text-blue-400 border border-blue-500/40 transition-colors"
+                    } else {
+                        "text-xs px-2 py-0.5 rounded bg-gray-700/40 text-gray-500 border border-gray-600/30 transition-colors"
+                    }
+                >"Highlight"</button>
+            </div>
             <div class="space-y-2">
                 <For
                     each=move || filtered_segments.clone()
-                    key=|seg| seg.index
-                    children=|seg| {
+                    key=|(_, seg)| seg.index
+                    children=move |(i, seg)| {
                         use crate::types::{segment_color, format_time};
                         let color = segment_color(&seg.label).to_string();
                         let time_str = format!(
@@ -364,16 +386,34 @@ fn AnalysisContent(track: TrackDataset, viz_href: String) -> impl IntoView {
                             seg.duration,
                             seg.beat_count
                         );
+                        let stagger_ms = (i * 60).min(400);
+                        let seg_idx = seg.index;
+                        let inner_class = move || {
+                            let base = "bg-gray-800/60 rounded-lg px-4 py-3 border border-gray-700/50 flex items-start gap-3 transition-opacity duration-300";
+                            if highlight_enabled.get() && ctx.is_playing.get() && active_seg_index.get().is_some() {
+                                if active_seg_index.get() == Some(seg_idx as usize) {
+                                    format!("{} opacity-100", base)
+                                } else {
+                                    format!("{} opacity-25", base)
+                                }
+                            } else {
+                                base.to_string()
+                            }
+                        };
                         view! {
-                            <div class="bg-gray-800/60 rounded-lg px-4 py-3 border border-gray-700/50 flex items-start gap-3">
-                                <span class=format!("{color} px-2 py-0.5 rounded text-xs font-bold text-white flex-shrink-0 mt-0.5")>
-                                    {seg.label.clone()}
-                                </span>
-                                <div class="flex-1 min-w-0">
-                                    <p class="text-xs text-gray-400 font-mono mb-1">{time_str}</p>
-                                    {seg.caption.clone().map(|cap| view! {
-                                        <p class="text-sm text-gray-300 leading-relaxed">{cap}</p>
-                                    })}
+                            // 外側: animate-float-up (enter アニメーション担当)
+                            <div id=format!("seg-item-{}", seg_idx) class="animate-float-up" style=format!("animation-delay: {}ms", stagger_ms)>
+                                // 内側: ハイライト担当（アニメーションと干渉しない）
+                                <div class=inner_class>
+                                    <span class=format!("{color} px-2 py-0.5 rounded text-xs font-bold text-white flex-shrink-0 mt-0.5")>
+                                        {seg.label.clone()}
+                                    </span>
+                                    <div class="flex-1 min-w-0">
+                                        <p class="text-xs text-gray-400 font-mono mb-1">{time_str}</p>
+                                        {seg.caption.clone().map(|cap| view! {
+                                            <p class="text-sm text-gray-300 leading-relaxed">{cap}</p>
+                                        })}
+                                    </div>
                                 </div>
                             </div>
                         }

@@ -7,9 +7,31 @@
   <script src="https://cdn.tailwindcss.com"></script>
   <script>
     tailwind.config = {
-      theme: { extend: {} }
+      theme: {
+        extend: {
+          keyframes: {
+            floatUp: {
+              '0%':   { opacity: '0', transform: 'translateY(12px)' },
+              '100%': { opacity: '1', transform: 'translateY(0)' },
+            },
+          },
+          animation: {
+            'float-up': 'floatUp 0.35s ease-out both',
+          },
+        },
+      },
     }
   </script>
+  <style>
+@keyframes cardEnter {
+  from { opacity: 0; transform: translateY(var(--from-y, 0px)); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@keyframes cardLeave {
+  from { opacity: 1; transform: translateY(0); }
+  to   { opacity: 0; transform: translateY(var(--to-y, 0px)); }
+}
+  </style>
   <link data-trunk rel="rust" />
 </head>
 <body class="bg-gray-950 text-gray-100 min-h-screen">

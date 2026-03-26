@@ -1,6 +1,22 @@
 use crate::components::player::PlaybackContext;
 use crate::types::{format_time, segment_color, SegmentResult, TrackDataset};
 use leptos::*;
+use wasm_bindgen::prelude::*;
+use wasm_bindgen::JsCast;
+
+/// viewport 上の list_id 要素 top と card_id 要素 top の差を返す
+fn measure_delta_y(list_id: &str, card_id: &str) -> f64 {
+    let Some(doc) = web_sys::window().and_then(|w| w.document()) else {
+        return 0.0;
+    };
+    let Some(list_el) = doc.get_element_by_id(list_id) else {
+        return 0.0;
+    };
+    let Some(card_el) = doc.get_element_by_id(card_id) else {
+        return 0.0;
+    };
+    list_el.get_bounding_client_rect().top() - card_el.get_bounding_client_rect().top()
+}
 
 #[component]
 pub fn SectionCard(track: TrackDataset) -> impl IntoView {
@@ -9,23 +25,115 @@ pub fn SectionCard(track: TrackDataset) -> impl IntoView {
     let (prev_idx, set_prev_idx) = create_signal::<Option<usize>>(None);
     let segments = store_value(track.segments.clone());
 
-    // Auto open/close based on segment changes
+    // アニメーション用インラインスタイル
+    let (anim_style, set_anim_style) = create_signal("opacity:0;pointer-events:none".to_string());
+    // 高速切替時の stale closure 防止カウンタ
+    let (anim_gen, set_anim_gen) = create_signal(0u32);
+
+    // セグメント変更時のアニメーション制御
     create_effect(move |_| {
         let new_idx = ctx.current_segment_idx.get();
         let old_idx = prev_idx.get_untracked();
-        if new_idx != old_idx {
-            set_prev_idx.set(new_idx);
-            set_card_open.set(new_idx.is_some());
+        if new_idx == old_idx {
+            return;
+        }
+
+        let segs = segments.get_value();
+
+        let is_valid = |idx: Option<usize>| -> bool {
+            idx.and_then(|i| segs.get(i)).map_or(false, |s| {
+                let l = s.label.to_lowercase();
+                l != "start" && l != "end"
+            })
+        };
+        let seg_struct_index = |idx: Option<usize>| -> Option<usize> {
+            idx.and_then(|i| segs.get(i)).map(|s| s.index as usize)
+        };
+
+        set_prev_idx.set(new_idx);
+
+        let new_valid = is_valid(new_idx);
+        let old_valid = is_valid(old_idx) && card_open.get_untracked();
+
+        // 世代カウンタをインクリメント
+        let gen = anim_gen.get_untracked() + 1;
+        set_anim_gen.set(gen);
+
+        if old_valid && new_valid {
+            // Leave前に両位置を測定（Leave中はカードが動くため）
+            let to_y = seg_struct_index(old_idx).map_or(0.0, |id| {
+                measure_delta_y(&format!("seg-item-{}", id), "section-card-root")
+            });
+            let from_y = seg_struct_index(new_idx).map_or(0.0, |id| {
+                measure_delta_y(&format!("seg-item-{}", id), "section-card-root")
+            });
+
+            // Leave アニメーション開始
+            set_anim_style.set(format!(
+                "--to-y:{to_y}px;animation:cardLeave 0.3s ease-in both"
+            ));
+
+            // 310ms後に Enter アニメーション
+            let closure = Closure::once(move || {
+                if anim_gen.get_untracked() == gen {
+                    set_anim_style.set(format!(
+                        "--from-y:{from_y}px;animation:cardEnter 0.35s ease-out both;pointer-events:auto"
+                    ));
+                }
+            });
+            web_sys::window()
+                .unwrap()
+                .set_timeout_with_callback_and_timeout_and_arguments_0(
+                    closure.as_ref().unchecked_ref(),
+                    310,
+                )
+                .unwrap();
+            closure.forget();
+        } else if old_valid && !new_valid {
+            // Leave してそのまま非表示
+            let to_y = seg_struct_index(old_idx).map_or(0.0, |id| {
+                measure_delta_y(&format!("seg-item-{}", id), "section-card-root")
+            });
+            set_anim_style.set(format!(
+                "--to-y:{to_y}px;animation:cardLeave 0.3s ease-in both"
+            ));
+            let closure = Closure::once(move || {
+                if anim_gen.get_untracked() == gen {
+                    set_card_open.set(false);
+                    set_anim_style.set("opacity:0;pointer-events:none".to_string());
+                }
+            });
+            web_sys::window()
+                .unwrap()
+                .set_timeout_with_callback_and_timeout_and_arguments_0(
+                    closure.as_ref().unchecked_ref(),
+                    310,
+                )
+                .unwrap();
+            closure.forget();
+        } else if !old_valid && new_valid {
+            // 初回表示: リストアイテム位置から Enter
+            let from_y = seg_struct_index(new_idx).map_or(0.0, |id| {
+                measure_delta_y(&format!("seg-item-{}", id), "section-card-root")
+            });
+            set_card_open.set(true);
+            set_anim_style.set(format!(
+                "--from-y:{from_y}px;animation:cardEnter 0.35s ease-out both;pointer-events:auto"
+            ));
+        } else {
+            set_card_open.set(false);
+            set_anim_style.set("opacity:0;pointer-events:none".to_string());
         }
     });
 
-    // Close when playback ends
+    // 再生終了時に非表示
     create_effect(move |_| {
         let playing = ctx.is_playing.get();
         let t = ctx.current_time.get();
         let d = ctx.duration.get();
         if !playing && d > 0.0 && t >= d - 0.5 {
             set_card_open.set(false);
+            set_anim_style.set("opacity:0;pointer-events:none".to_string());
         }
     });
 
@@ -51,14 +159,17 @@ pub fn SectionCard(track: TrackDataset) -> impl IntoView {
     });
 
     view! {
-        // 楽曲のセクションラベルがStart/End以外のときだけ描画する
-        <Show when=move || {
-            let seg = current_seg.get();
-            card_open.get() 
-                && seg.is_some() 
-                && seg.map_or(false, |s| s.label.to_lowercase() != "end"&&s.label.to_lowercase() != "start")
-        }>
-            <div class="fixed bottom-4 right-4 w-80 max-h-96 overflow-y-auto bg-gray-800 rounded-xl p-4 shadow-2xl border border-gray-600 z-20">
+        <div
+            id="section-card-root"
+            class="absolute bottom-[20%] left-6 right-[280px] max-w-4xl mx-auto max-h-96 overflow-y-auto bg-gray-800 rounded-xl p-4 shadow-2xl border border-gray-600 z-20"
+            style=move || anim_style.get()
+        >
+            <Show when=move || {
+                let seg = current_seg.get();
+                card_open.get()
+                    && seg.is_some()
+                    && seg.map_or(false, |s| s.label.to_lowercase() != "end" && s.label.to_lowercase() != "start")
+            }>
                 // Header
                 <div class="flex items-center justify-between mb-3">
                     <div class="flex items-center gap-2">
@@ -79,7 +190,10 @@ pub fn SectionCard(track: TrackDataset) -> impl IntoView {
                     </div>
                     <button
                         class="text-gray-500 hover:text-white text-sm leading-none ml-1 flex-shrink-0"
-                        on:click=move |_| set_card_open.set(false)
+                        on:click=move |_| {
+                            set_card_open.set(false);
+                            set_anim_style.set("opacity:0;pointer-events:none".to_string());
+                        }
                     >"[X]"</button>
                 </div>
 
@@ -94,7 +208,7 @@ pub fn SectionCard(track: TrackDataset) -> impl IntoView {
                 <p class="text-xs text-gray-500 mt-3 border-t border-gray-700 pt-2">
                     {move || beat_count.get()}" beats"
                 </p>
-            </div>
-        </Show>
+            </Show>
+        </div>
     }
 }
