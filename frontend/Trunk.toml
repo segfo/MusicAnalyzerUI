@@ -1,0 +1,11 @@
+[build]
+target = "index.html"
+dist = "dist"
+
+[serve]
+port = 8080
+open = false
+
+[[proxy]]
+backend = "http://127.0.0.1:7777/api/"
+rewrite = "/api/"
