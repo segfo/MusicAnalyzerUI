@@ -334,7 +334,7 @@ pub fn SectionCard(track: TrackDataset) -> impl IntoView {
     view! {
         <div
             id="section-card-root"
-            class="absolute bottom-[20%] left-6 right-[280px] max-w-4xl mx-auto max-h-96 overflow-y-auto bg-gray-800 rounded-xl p-4 shadow-2xl border border-gray-600 z-20"
+            class="absolute bottom-[40%] left-6 right-[280px] max-w-4xl mx-auto max-h-96 overflow-y-auto bg-gray-800 rounded-xl p-4 shadow-2xl border border-gray-600 z-20"
             style=move || anim_style.get()
         >
             <Show when=move || {
@@ -355,10 +355,15 @@ pub fn SectionCard(track: TrackDataset) -> impl IntoView {
                             {move || label.get()}
                         </span>
                         <span class="text-gray-400 text-xs font-mono">
-                            {move || format!("{} - {}",
-                                format_time(seg_start.get()),
-                                format_time(seg_end.get())
-                            )}
+                            {move || {
+                                let ss=seg_start.get();
+                                let se=seg_end.get();
+                                format!("{} - {} ({:.1}s, {} beats)",
+                                format_time(ss),
+                                format_time(se),
+                                se-ss,
+                                beat_count.get()
+                            )}}
                         </span>
                     </div>
                     <button
@@ -377,11 +382,6 @@ pub fn SectionCard(track: TrackDataset) -> impl IntoView {
                         {move || caption.get().unwrap_or_default()}
                     </p>
                 </Show>
-
-                // Beat count
-                <p class="text-xs text-gray-500 mt-3 border-t border-gray-700 pt-2">
-                    {move || beat_count.get()}" beats"
-                </p>
             </Show>
         </div>
     }
