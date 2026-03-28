@@ -73,12 +73,14 @@ pub fn setup_stem_handoff_effect(
         if !global.stems_available.get() { return; }
 
         // 復元された stem volumes を新しい GainNode に適用（UI と音声を同期）
+        // マスター音量も掛け合わせて適用する（ページ遷移後も音量が維持されるよう）
         let vols = viz_state.stem_volumes.get_untracked();
+        let master = global.volume.get_untracked();
         if let Some(gains) = global.stem_gains.get_value() {
-            gains.vocals.gain().set_value(vols.vocals as f32);
-            gains.drums.gain().set_value(vols.drums as f32);
-            gains.bass.gain().set_value(vols.bass as f32);
-            gains.others.gain().set_value(vols.others as f32);
+            gains.vocals.gain().set_value((master * vols.vocals) as f32);
+            gains.drums.gain().set_value((master * vols.drums) as f32);
+            gains.bass.gain().set_value((master * vols.bass) as f32);
+            gains.others.gain().set_value((master * vols.others) as f32);
         }
 
         // engine がまだ再生中の場合のみ引き継ぎ（ナビゲーション時の二重実行防止）

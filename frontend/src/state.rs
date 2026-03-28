@@ -130,7 +130,7 @@ impl VisualizationPageState {
             loop_end:                 create_rw_signal(None::<f64>),
             loop_active:              create_rw_signal(false),
             selected_segment_indices: create_rw_signal(Vec::<u32>::new()),
-            highlight_enabled:        create_rw_signal(false),
+            highlight_enabled:        create_rw_signal(true),
         }
     }
 
