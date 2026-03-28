@@ -31,9 +31,50 @@ pub fn SectionCard(track: TrackDataset) -> impl IntoView {
     let (anim_gen, set_anim_gen) = create_signal(0u32);
     // 保留中のタイムアウトハンドル（コンポーネントアンマウント時にキャンセル）
     let timeout_handle: StoredValue<Option<TimeoutHandle>> = store_value(None);
+    // セクション切替 0.5s 前からフェードアウト中かどうか
+    let (pre_leaving, set_pre_leaving) = create_signal(false);
+
     on_cleanup(move || {
         if let Some(h) = timeout_handle.get_value() {
             h.clear();
+        }
+    });
+
+    // 現在時刻を監視してセクション終了 0.5s 前にフェードアウトを開始
+    create_effect(move |_| {
+        let t = ctx.current_time.get();
+
+        // カードが表示中かつフェードアウト未開始の場合のみ処理
+        if !card_open.get_untracked() || pre_leaving.get_untracked() {
+            return;
+        }
+
+        let idx = ctx.current_segment_idx.get_untracked();
+        let segs = segments.get_value();
+        let Some(i) = idx else { return; };
+        let Some(seg) = segs.get(i) else { return; };
+
+        let l = seg.label.to_lowercase();
+        if l == "start" || l == "end" {
+            return;
+        }
+
+        // セグメント終了 0.5s 前に達したらフェードアウト開始
+        if t >= seg.end - 0.5 {
+            set_pre_leaving.set(true);
+
+            let gen = anim_gen.get_untracked() + 1;
+            set_anim_gen.set(gen);
+
+            // 進行中の enter タイムアウトをキャンセル
+            if let Some(h) = timeout_handle.get_value() {
+                h.clear();
+            }
+
+            let to_y = measure_delta_y(&format!("seg-item-{}", seg.index), "section-card-root");
+            set_anim_style.set(format!(
+                "--to-y:{to_y}px;animation:cardLeave 0.5s ease-in both"
+            ));
         }
     });
 
@@ -62,49 +103,67 @@ pub fn SectionCard(track: TrackDataset) -> impl IntoView {
         let new_valid = is_valid(new_idx);
         let old_valid = is_valid(old_idx) && card_open.get_untracked();
 
+        // pre_leaving 状態をリセット（次セグメントの監視に備える）
+        let was_pre_leaving = pre_leaving.get_untracked();
+        set_pre_leaving.set(false);
+
         // 世代カウンタをインクリメント
         let gen = anim_gen.get_untracked() + 1;
         set_anim_gen.set(gen);
 
+        // 進行中のタイムアウトをキャンセル
+        if let Some(h) = timeout_handle.get_value() {
+            h.clear();
+        }
+
         if old_valid && new_valid {
-            // Leave前に両位置を測定（Leave中はカードが動くため）
-            let to_y = seg_struct_index(old_idx).map_or(0.0, |id| {
-                measure_delta_y(&format!("seg-item-{}", id), "section-card-root")
-            });
-            let from_y = seg_struct_index(new_idx).map_or(0.0, |id| {
-                measure_delta_y(&format!("seg-item-{}", id), "section-card-root")
-            });
-
-            // Leave アニメーション開始
-            set_anim_style.set(format!(
-                "--to-y:{to_y}px;animation:cardLeave 0.3s ease-in both"
-            ));
-
-            // 310ms後に Enter アニメーション
-            // 前回の保留タイムアウトをキャンセルしてから新しいものを登録
-            if let Some(h) = timeout_handle.get_value() { h.clear(); }
-            timeout_handle.set_value(set_timeout_with_handle(move || {
-                if anim_gen.get_untracked() == gen {
-                    set_anim_style.set(format!(
-                        "--from-y:{from_y}px;animation:cardEnter 0.35s ease-out both;pointer-events:auto"
-                    ));
-                }
-            }, Duration::from_millis(310)).ok());
+            if was_pre_leaving {
+                // 0.5s 前からフェードアウト済み → セクション切替タイミングで即フェードイン
+                let from_y = seg_struct_index(new_idx).map_or(0.0, |id| {
+                    measure_delta_y(&format!("seg-item-{}", id), "section-card-root")
+                });
+                set_anim_style.set(format!(
+                    "--from-y:{from_y}px;animation:cardEnter 0.35s ease-out both;pointer-events:auto"
+                ));
+            } else {
+                // 通常遷移（スクラブ等）: Leave → Enter
+                let to_y = seg_struct_index(old_idx).map_or(0.0, |id| {
+                    measure_delta_y(&format!("seg-item-{}", id), "section-card-root")
+                });
+                let from_y = seg_struct_index(new_idx).map_or(0.0, |id| {
+                    measure_delta_y(&format!("seg-item-{}", id), "section-card-root")
+                });
+                set_anim_style.set(format!(
+                    "--to-y:{to_y}px;animation:cardLeave 0.3s ease-in both"
+                ));
+                timeout_handle.set_value(set_timeout_with_handle(move || {
+                    if anim_gen.get_untracked() == gen {
+                        set_anim_style.set(format!(
+                            "--from-y:{from_y}px;animation:cardEnter 0.35s ease-out both;pointer-events:auto"
+                        ));
+                    }
+                }, Duration::from_millis(310)).ok());
+            }
         } else if old_valid && !new_valid {
-            // Leave してそのまま非表示
-            let to_y = seg_struct_index(old_idx).map_or(0.0, |id| {
-                measure_delta_y(&format!("seg-item-{}", id), "section-card-root")
-            });
-            set_anim_style.set(format!(
-                "--to-y:{to_y}px;animation:cardLeave 0.3s ease-in both"
-            ));
-            if let Some(h) = timeout_handle.get_value() { h.clear(); }
-            timeout_handle.set_value(set_timeout_with_handle(move || {
-                if anim_gen.get_untracked() == gen {
-                    set_card_open.set(false);
-                    set_anim_style.set("opacity:0;pointer-events:none".to_string());
-                }
-            }, Duration::from_millis(310)).ok());
+            if was_pre_leaving {
+                // フェードアウト済み → そのまま非表示
+                set_card_open.set(false);
+                set_anim_style.set("opacity:0;pointer-events:none".to_string());
+            } else {
+                // 通常遷移: Leave してから非表示
+                let to_y = seg_struct_index(old_idx).map_or(0.0, |id| {
+                    measure_delta_y(&format!("seg-item-{}", id), "section-card-root")
+                });
+                set_anim_style.set(format!(
+                    "--to-y:{to_y}px;animation:cardLeave 0.3s ease-in both"
+                ));
+                timeout_handle.set_value(set_timeout_with_handle(move || {
+                    if anim_gen.get_untracked() == gen {
+                        set_card_open.set(false);
+                        set_anim_style.set("opacity:0;pointer-events:none".to_string());
+                    }
+                }, Duration::from_millis(310)).ok());
+            }
         } else if !old_valid && new_valid {
             // 初回表示: リストアイテム位置から Enter
             let from_y = seg_struct_index(new_idx).map_or(0.0, |id| {
