@@ -118,6 +118,8 @@ pub struct VisualizationPageState {
     pub selected_segment_indices: RwSignal<Vec<u32>>,
     /// セクションリストのハイライト表示フラグ
     pub highlight_enabled: RwSignal<bool>,
+    /// SectionCard 表示フラグ
+    pub section_card_enabled: RwSignal<bool>,
 }
 
 impl VisualizationPageState {
@@ -131,6 +133,7 @@ impl VisualizationPageState {
             loop_active:              create_rw_signal(false),
             selected_segment_indices: create_rw_signal(Vec::<u32>::new()),
             highlight_enabled:        create_rw_signal(true),
+            section_card_enabled:     create_rw_signal(false),
         }
     }
 

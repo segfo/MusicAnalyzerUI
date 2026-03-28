@@ -206,6 +206,8 @@ fn AnalysisContent(track: TrackDataset, viz_href: String) -> impl IntoView {
     let viz_page_state = use_context::<VisualizationPageState>().expect("VisualizationPageState missing");
     let highlight_enabled = viz_page_state.highlight_enabled.read_only();
     let set_highlight_enabled = viz_page_state.highlight_enabled.write_only();
+    let section_card_enabled = viz_page_state.section_card_enabled.read_only();
+    let set_section_card_enabled = viz_page_state.section_card_enabled.write_only();
     let segments_sv = store_value(track.segments.clone());
     let active_seg_index: Memo<Option<usize>> = create_memo(move |_| {
         ctx.current_segment_idx
@@ -230,15 +232,26 @@ fn AnalysisContent(track: TrackDataset, viz_href: String) -> impl IntoView {
             // Section list (filter out Start/End segments)
             <div class="flex items-center justify-between mb-3">
                 <h3 class="text-sm font-medium text-gray-400 uppercase tracking-wider">"Sections"</h3>
-                // ハイライト有効化ボタン
-                <button
-                    on:click=move |_| set_highlight_enabled.update(|v| *v = !*v)
-                    class=move || if highlight_enabled.get() {
-                        "text-xs px-2 py-0.5 rounded bg-blue-500/20 text-blue-400 border border-blue-500/40 transition-colors"
-                    } else {
-                        "text-xs px-2 py-0.5 rounded bg-gray-700/40 text-gray-500 border border-gray-600/30 transition-colors"
-                    }
-                >"Highlight"</button>
+                <div class="flex items-center gap-3">
+                    // SectionCard 表示トグル
+                    <button
+                        on:click=move |_| set_section_card_enabled.update(|v| *v = !*v)
+                        class=move || if section_card_enabled.get() {
+                            "text-xs px-2 py-0.5 rounded bg-blue-500/20 text-blue-400 border border-blue-500/40 transition-colors"
+                        } else {
+                            "text-xs px-2 py-0.5 rounded bg-gray-700/40 text-gray-500 border border-gray-600/30 transition-colors"
+                        }
+                    >"SectionCard"</button>
+                    // ハイライト有効化ボタン
+                    <button
+                        on:click=move |_| set_highlight_enabled.update(|v| *v = !*v)
+                        class=move || if highlight_enabled.get() {
+                            "text-xs px-2 py-0.5 rounded bg-blue-500/20 text-blue-400 border border-blue-500/40 transition-colors"
+                        } else {
+                            "text-xs px-2 py-0.5 rounded bg-gray-700/40 text-gray-500 border border-gray-600/30 transition-colors"
+                        }
+                    >"Highlight"</button>
+                </div>
             </div>
             <div class="space-y-2">
                 <For
