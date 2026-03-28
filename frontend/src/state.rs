@@ -1,4 +1,4 @@
-use crate::components::player::{AudioEngine, StemAudioEngine, StemGains, StemVolumes};
+use crate::audio::{AudioEngine, StemAudioEngine, StemGains, StemVolumes};
 use leptos::*;
 use std::collections::HashMap;
 
@@ -25,7 +25,11 @@ pub struct GlobalPlayback {
     pub stem_engine:   StoredValue<Option<StemAudioEngine>>,
     pub stem_gains:    StoredValue<Option<StemGains>>,
     pub stems_available: RwSignal<bool>,
-    pub stems_loading: RwSignal<bool>,
+    pub stems_loading:   RwSignal<bool>,
+    /// ステムロード失敗時のエラーメッセージ（None = エラーなし）
+    pub stems_error:     RwSignal<Option<String>>,
+    /// 現在ロード中のステムキー。高速切り替え時の競合防止に使用。
+    pub loading_stem_key: StoredValue<String>,
 }
 
 impl GlobalPlayback {
@@ -36,11 +40,13 @@ impl GlobalPlayback {
             is_playing:      create_rw_signal(false),
             duration:        create_rw_signal(0.0),
             volume:          create_rw_signal(1.0),
-            engine:          store_value(None),
-            stem_engine:     store_value(None),
-            stem_gains:      store_value(None),
-            stems_available: create_rw_signal(false),
-            stems_loading:   create_rw_signal(false),
+            engine:           store_value(None),
+            stem_engine:      store_value(None),
+            stem_gains:       store_value(None),
+            stems_available:  create_rw_signal(false),
+            stems_loading:    create_rw_signal(false),
+            stems_error:      create_rw_signal(None),
+            loading_stem_key: store_value(String::new()),
         }
     }
 
@@ -68,6 +74,7 @@ impl GlobalPlayback {
         self.duration.set(0.0);
         self.stems_available.set(false);
         self.stems_loading.set(false);
+        self.stems_error.set(None);
     }
 }
 

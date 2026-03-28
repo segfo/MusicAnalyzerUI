@@ -1,7 +1,9 @@
 use crate::{
     api,
+    audio_setup::{setup_stem_handoff_effect, setup_switch_song_effect, use_playback_polling},
     components::{
-        player::Player,
+        error_display::ErrorPanel,
+        player::{AudioEngine, PlaybackContext, Player},
         stem_mixer::StemMixer,
         timeline::Timeline,
         viz_canvas::VizCanvas,
@@ -11,15 +13,12 @@ use crate::{
 };
 use leptos::*;
 use leptos_router::*;
-use leptos_use::use_interval_fn;
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::JsFuture;
 use web_sys::{AudioBuffer, AudioContext, GainNode};
 
-use crate::components::player::{AudioEngine, PlaybackContext};
-
-// ─── StemAudioEngine 等は components/player.rs で定義 → 再エクスポート ─────────
-pub use crate::components::player::{StemAudioEngine, StemGains, StemVolumes};
+// ─── StemAudioEngine 等は audio/engine.rs で定義 → 再エクスポート ─────────────
+pub use crate::audio::{StemAudioEngine, StemGains};
 
 // ---------------------------------------------------------------------------
 // load_stems — ステムをバックグラウンドでロードする共有ヘルパー
@@ -29,22 +28,34 @@ pub use crate::components::player::{StemAudioEngine, StemGains, StemVolumes};
 
 pub async fn load_stems(global: crate::state::GlobalPlayback, stem_key: String) {
     if global.stem_engine.get_value().is_some() { return; }
+    // このロードが最新であることを記録（古いロードタスクが自己中断できるように）
+    global.loading_stem_key.set_value(stem_key.clone());
     global.stems_loading.set(true);
-    load_stems_inner(&global, &stem_key).await;
+    global.stems_error.set(None);
+    if let Err(e) = load_stems_inner(&global, &stem_key).await {
+        // キャンセル（中断）以外のエラーだけ表示する
+        if global.loading_stem_key.get_value() == stem_key {
+            global.stems_error.set(Some(e));
+        }
+    }
     global.stems_loading.set(false);
 }
 
-async fn load_stems_inner(global: &crate::state::GlobalPlayback, stem_key: &str) {
+/// Ok(()) = 成功または正常キャンセル、Err(msg) = ユーザーに見せるエラー
+async fn load_stems_inner(global: &crate::state::GlobalPlayback, stem_key: &str) -> Result<(), String> {
     let avail = match api::fetch_stem_availability(stem_key).await {
         Ok(a) if a.any_available() => a,
-        _ => return,
+        Ok(_) => return Err("No stems available for this track".to_string()),
+        Err(e) => return Err(format!("Failed to fetch stem availability: {e}")),
     };
+    // ステム切り替えで古いタスクを中断（エラーとして扱わない）
+    if global.loading_stem_key.get_value() != stem_key { return Ok(()); }
 
-    let Ok(stem_ctx) = AudioContext::new() else { return };
+    let stem_ctx = AudioContext::new().map_err(|e| format!("AudioContext error: {e:?}"))?;
 
     let mut gain_opts: [Option<GainNode>; 4] = [None, None, None, None];
     for i in 0..4 {
-        let Ok(g) = stem_ctx.create_gain() else { return };
+        let g = stem_ctx.create_gain().map_err(|e| format!("GainNode error: {e:?}"))?;
         let _ = g.connect_with_audio_node(&stem_ctx.destination());
         gain_opts[i] = Some(g);
     }
@@ -62,13 +73,17 @@ async fn load_stems_inner(global: &crate::state::GlobalPlayback, stem_key: &str)
     for (i, name) in stem_names.iter().enumerate() {
         if !available_flags[i] { continue; }
         let Ok(arr_buf) = api::fetch_stem_array_buffer(stem_key, name).await else { continue };
+        if global.loading_stem_key.get_value() != stem_key { return Ok(()); }
         let Ok(decode_promise) = stem_ctx.decode_audio_data(&arr_buf) else { continue };
         let Ok(decoded) = JsFuture::from(decode_promise).await else { continue };
+        if global.loading_stem_key.get_value() != stem_key { return Ok(()); }
         let Ok(buf) = decoded.dyn_into::<AudioBuffer>() else { continue };
         buffers[i] = Some(buf);
     }
 
-    if buffers.iter().all(|b| b.is_none()) { return; }
+    if buffers.iter().all(|b| b.is_none()) {
+        return Err("All stem audio files failed to decode".to_string());
+    }
 
     global.stem_gains.set_value(Some(StemGains {
         vocals: gains_arr[0].clone(),
@@ -82,12 +97,17 @@ async fn load_stems_inner(global: &crate::state::GlobalPlayback, stem_key: &str)
     global.stem_engine.set_value(Some(stem_eng));
     global.duration.set(stem_dur);
     global.stems_available.set(true);
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
 // VizContext — shared state for all visualization components
 // ---------------------------------------------------------------------------
 
+/// エフェメラルなビジュアライゼーション専用シグナル。
+/// GlobalPlayback / VisualizationPageState と重複するフィールドは保持しない。
+/// コンポーネントは必要に応じて use_context::<GlobalPlayback>() /
+/// use_context::<VisualizationPageState>() を直接呼ぶこと。
 #[derive(Clone)]
 pub struct VizContext {
     pub energy: ReadSignal<f64>,
@@ -96,28 +116,33 @@ pub struct VizContext {
     pub set_density: WriteSignal<f64>,
     pub current_hue: ReadSignal<f64>,
     pub set_current_hue: WriteSignal<f64>,
+    pub current_chord: ReadSignal<String>,
+    pub set_current_chord: WriteSignal<String>,
     pub beat_trigger: ReadSignal<u32>,
     pub set_beat_trigger: WriteSignal<u32>,
     pub downbeat_trigger: ReadSignal<u32>,
     pub set_downbeat_trigger: WriteSignal<u32>,
-    pub stem_volumes: ReadSignal<StemVolumes>,
-    pub set_stem_volumes: WriteSignal<StemVolumes>,
-    pub stems_available: ReadSignal<bool>,
-    pub set_stems_available: WriteSignal<bool>,
-    pub loop_start: ReadSignal<Option<f64>>,
-    pub set_loop_start: WriteSignal<Option<f64>>,
-    pub loop_end: ReadSignal<Option<f64>>,
-    pub set_loop_end: WriteSignal<Option<f64>>,
-    pub loop_active: ReadSignal<bool>,
-    pub set_loop_active: WriteSignal<bool>,
-    pub selected_segment_indices: ReadSignal<Vec<u32>>,
-    pub set_selected_segment_indices: WriteSignal<Vec<u32>>,
-    pub stem_gains: StoredValue<Option<StemGains>>,
-    /// Stem engine — Some when stems are loaded and usable
-    pub stem_engine: StoredValue<Option<StemAudioEngine>>,
-    /// Beat timing offset in seconds (negative = fire earlier, positive = later)
-    pub beat_offset: ReadSignal<f64>,
-    pub set_beat_offset: WriteSignal<f64>,
+}
+
+impl VizContext {
+    /// ビジュアライゼーションシグナルをデフォルト値で生成する。
+    /// Analysis ページのように VizCanvas を持たないページでは
+    /// `provide_context(VizContext::new_dummy())` の1行で済む。
+    pub fn new_dummy() -> Self {
+        let (energy,          set_energy)          = create_signal(0.5_f64);
+        let (density,         set_density)         = create_signal(0.5_f64);
+        let (current_hue,     set_current_hue)     = create_signal(220.0_f64);
+        let (current_chord,   set_current_chord)   = create_signal(String::new());
+        let (beat_trigger,    set_beat_trigger)    = create_signal(0u32);
+        let (downbeat_trigger, set_downbeat_trigger) = create_signal(0u32);
+        Self {
+            energy, set_energy, density, set_density,
+            current_hue, set_current_hue,
+            current_chord, set_current_chord,
+            beat_trigger, set_beat_trigger,
+            downbeat_trigger, set_downbeat_trigger,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -172,63 +197,22 @@ pub fn Visualization() -> impl IntoView {
         }
     });
 
-    // --- GlobalPlayback のシグナルを PlaybackContext 用に分割 ---
-    let current_time     = global.current_time.read_only();
-    let set_current_time = global.current_time.write_only();
-    let is_playing       = global.is_playing.read_only();
-    let set_is_playing   = global.is_playing.write_only();
-    let duration         = global.duration.read_only();
-    let set_duration     = global.duration.write_only();
-    let volume           = global.volume.read_only();
-    let set_volume       = global.volume.write_only();
-    let engine           = global.engine;
+    // --- VizContext 生成（WriteSignal は Copy なので先に退避してから provide）---
+    let viz_ctx = VizContext::new_dummy();
+    let (set_energy, set_density, set_current_hue, set_current_chord, set_beat_trigger, set_downbeat_trigger) = (
+        viz_ctx.set_energy, viz_ctx.set_density, viz_ctx.set_current_hue,
+        viz_ctx.set_current_chord, viz_ctx.set_beat_trigger, viz_ctx.set_downbeat_trigger,
+    );
 
-    // VizContext 固有シグナル
-    // エフェメラル（再計算可能）なものはローカルシグナルのまま
-    let (energy, set_energy) = create_signal(0.5_f64);
-    let (density, set_density) = create_signal(0.5_f64);
-    let (current_hue, set_current_hue) = create_signal(220.0_f64);
-    let (beat_trigger, set_beat_trigger) = create_signal(0u32);
-    let (downbeat_trigger, set_downbeat_trigger) = create_signal(0u32);
-    // ページUI設定（VisualizationPageState から取得して永続化）
-    let stem_volumes     = viz_page_state.stem_volumes.read_only();
-    let set_stem_volumes = viz_page_state.stem_volumes.write_only();
-    let loop_start       = viz_page_state.loop_start.read_only();
-    let set_loop_start   = viz_page_state.loop_start.write_only();
-    let loop_end         = viz_page_state.loop_end.read_only();
-    let set_loop_end     = viz_page_state.loop_end.write_only();
-    let loop_active      = viz_page_state.loop_active.read_only();
-    let set_loop_active  = viz_page_state.loop_active.write_only();
-    let selected_segment_indices     = viz_page_state.selected_segment_indices.read_only();
-    let set_selected_segment_indices = viz_page_state.selected_segment_indices.write_only();
-    let beat_offset      = viz_page_state.beat_offset.read_only();
-    let set_beat_offset  = viz_page_state.beat_offset.write_only();
-
-    // stems_available / stem_gains / stem_engine は GlobalPlayback から
-    let stems_available     = global.stems_available.read_only();
-    let set_stems_available = global.stems_available.write_only();
-    let stem_gains_sv       = global.stem_gains;
-    let stem_engine_sv      = global.stem_engine;
-
-    // --- Beat/section/chord tracking ---
-    let prev_beat_idx: StoredValue<usize> = store_value(0);
-    let prev_downbeat_idx: StoredValue<usize> = store_value(0);
+    // --- Beat/section/chord 変化追跡用（tick 間の状態保持）---
+    let prev_beat_idx:      StoredValue<usize>  = store_value(0);
+    let prev_downbeat_idx:  StoredValue<usize>  = store_value(0);
     let prev_segment_label: StoredValue<String> = store_value(String::new());
-    let prev_chord_label: StoredValue<String> = store_value(String::new());
+    let prev_chord_label:   StoredValue<String> = store_value(String::new());
+    let beat_offset = viz_page_state.beat_offset.read_only();
 
     // --- 楽曲切り替えを stem() の変化から即座に検出して音量を UI に反映 ---
-    // audio ロードより先に同期的に実行されるため、UI がデフォルト値を表示するまでの遅延がない
-    create_effect({
-        let global = global.clone();
-        let viz_page_state = viz_page_state.clone();
-        move |_| {
-            let s = stem(); // reactive dependency: stem が変わるとここが再実行される
-            let old = global.loaded_stem.get_untracked();
-            if s == old { return; } // 同一楽曲（または初回ロード済み）は何もしない
-            let audio_state = viz_page_state.switch_song(&old, &s, global.volume.get_untracked());
-            global.volume.set(audio_state.master_volume);
-        }
-    });
+    setup_switch_song_effect(global.clone(), viz_page_state.clone(), stem);
 
     // --- 新規ロード時のみエンジンを作成してグローバルに保存 ---
     create_effect({
@@ -254,108 +238,22 @@ pub fn Visualization() -> impl IntoView {
     });
 
     // stems が利用可能になったらメイン AudioEngine をミュート・停止し StemAudioEngine に引き継ぐ
-    create_effect({
-        let global = global.clone();
-        let viz_page_state = viz_page_state.clone();
-        move |_| {
-            if !global.stems_available.get() { return; }
-            // 復元された stem volumes を新しい GainNode に適用（UI と音声を同期）
-            let vols = viz_page_state.stem_volumes.get_untracked();
-            if let Some(gains) = global.stem_gains.get_value() {
-                gains.vocals.gain().set_value(vols.vocals as f32);
-                gains.drums.gain().set_value(vols.drums as f32);
-                gains.bass.gain().set_value(vols.bass as f32);
-                gains.others.gain().set_value(vols.others as f32);
-            }
-            // engine がまだ再生中の場合のみ引き継ぎ（ナビゲーション時の二重実行防止）
-            let eng_playing = global.engine.get_value().map(|e| e.is_playing()).unwrap_or(false);
-            if !eng_playing {
-                if let Some(eng) = global.engine.get_value() { eng.set_volume(0.0); }
-                return;
-            }
-            let was_playing = global.is_playing.get_untracked();
-            let t = global.engine.get_value()
-                .map(|e| e.current_time())
-                .unwrap_or_else(|| global.current_time.get_untracked());
-            if let Some(eng) = global.engine.get_value() {
-                eng.set_volume(0.0);
-                eng.pause();
-            }
-            if let Some(stem_eng) = global.stem_engine.get_value() {
-                stem_eng.seek(t);
-                if was_playing {
-                    spawn_local(async move {
-                        stem_eng.resume_ctx().await;
-                        stem_eng.play();
-                    });
-                }
-            }
-        }
-    });
+    setup_stem_handoff_effect(global.clone(), viz_page_state.clone());
 
-    // --- current_segment_idx (for PlaybackContext) ---
+    // --- current_segment_idx ---
+    let ct = global.current_time;
     let current_segment_idx = create_memo(move |_| {
-        let t = current_time.get();
+        let t = ct.get();
         track_data.get().and_then(|r| r.ok()).and_then(|track| {
             track.segments.iter().position(|seg| t >= seg.start && t < seg.end)
         })
     });
 
-    provide_context(PlaybackContext {
-        current_time,
-        set_current_time,
-        is_playing,
-        set_is_playing,
-        duration,
-        set_duration,
-        volume,
-        set_volume,
-        current_segment_idx,
-        engine,
-        stem_engine: stem_engine_sv,
-        stem_gains:  stem_gains_sv,
-    });
-
-    let viz_ctx = VizContext {
-        energy, set_energy,
-        density, set_density,
-        current_hue, set_current_hue,
-        beat_trigger, set_beat_trigger,
-        downbeat_trigger, set_downbeat_trigger,
-        stem_volumes, set_stem_volumes,
-        stems_available, set_stems_available,
-        loop_start, set_loop_start,
-        loop_end, set_loop_end,
-        loop_active, set_loop_active,
-        selected_segment_indices, set_selected_segment_indices,
-        stem_gains: stem_gains_sv,
-        stem_engine: stem_engine_sv,
-        beat_offset,
-        set_beat_offset,
-    };
+    provide_context(PlaybackContext::new(&global, current_segment_idx));
     provide_context(viz_ctx);
 
-    // --- Polling loop (100 ms) ---
-    use_interval_fn(move || {
-        // Get current time from stem engine (if available) or main engine
-        let (t, eng_is_playing, eng_dur) = if let Some(s) = stem_engine_sv.get_value() {
-            (s.current_time(), s.is_playing(), s.duration())
-        } else if let Some(e) = engine.get_value() {
-            (e.current_time(), e.is_playing(), e.duration())
-        } else {
-            return;
-        };
-
-        set_current_time.set(t);
-
-        // End-of-track detection
-        if eng_is_playing && t >= eng_dur - 0.05 {
-            if let Some(s) = stem_engine_sv.get_value() { s.pause(); }
-            if let Some(e) = engine.get_value() { e.pause(); }
-            set_is_playing.set(false);
-            set_current_time.set(0.0);
-        }
-
+    // --- Visualization 固有のポーリング: ビート / セクション / コード検出 ---
+    use_playback_polling(global.clone(), viz_page_state.clone(), move |t| {
         let Some(Ok(track)) = track_data.get() else { return };
 
         // Beat detection (apply offset: positive offset fires triggers earlier)
@@ -391,22 +289,13 @@ pub fn Visualization() -> impl IntoView {
             if label != prev_chord_label.get_value() {
                 prev_chord_label.set_value(label.clone());
                 set_current_hue.set(chord_hue(&label));
+                set_current_chord.set(if label == "N" { String::new() } else { label });
             }
         }
-
-        // Loop control
-        if loop_active.get() {
-            if let (Some(ls), Some(le)) = (loop_start.get(), loop_end.get()) {
-                if ls < le && t >= le {
-                    if let Some(s) = stem_engine_sv.get_value() { s.seek(ls); }
-                    else if let Some(e) = engine.get_value() { e.seek(ls); }
-                    set_current_time.set(ls);
-                }
-            }
-        }
-    }, 100);
+    });
 
     let stems_loading = global.stems_loading;
+    let stems_error   = global.stems_error;
 
     view! {
         <div class="flex flex-col h-screen bg-gray-950 overflow-hidden relative">
@@ -416,6 +305,17 @@ pub fn Visualization() -> impl IntoView {
                     <div class="bg-gray-800 rounded-xl p-8 border border-gray-700 flex flex-col items-center gap-4">
                         <div class="w-10 h-10 border-4 border-orange-500 border-t-transparent rounded-full animate-spin" />
                         <p class="text-gray-200 font-medium">"Loading stems..."</p>
+                    </div>
+                </div>
+            })}
+            // ステムロードエラー表示
+            {move || stems_error.get().map(|e| view! {
+                <div class="absolute inset-x-0 top-0 z-40 mx-auto max-w-lg mt-4 px-4">
+                    <div class="bg-red-900/80 border border-red-700 rounded-xl p-4 flex items-start gap-3">
+                        <p class="text-red-300 text-sm flex-1">
+                            <span class="font-medium text-red-200">"Stem load failed: "</span>
+                            {e}
+                        </p>
                     </div>
                 </div>
             })}
@@ -439,12 +339,7 @@ pub fn Visualization() -> impl IntoView {
                         }.into_view()
                     },
                     Err(e) => view! {
-                        <div class="flex items-center justify-center h-full">
-                            <div class="bg-red-900/30 border border-red-700 rounded-xl p-6 max-w-md">
-                                <p class="text-red-400 font-medium mb-1">"Failed to load track"</p>
-                                <p class="text-red-300 text-sm">{e}</p>
-                            </div>
-                        </div>
+                        <ErrorPanel title="Failed to load track" message=e />
                     }.into_view(),
                 })}
             </Suspense>

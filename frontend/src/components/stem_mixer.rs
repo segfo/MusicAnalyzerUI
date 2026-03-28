@@ -1,7 +1,7 @@
 use leptos::*;
 use wasm_bindgen::JsCast;
 
-use crate::pages::visualization::VizContext;
+use crate::state::{GlobalPlayback, VisualizationPageState};
 
 // ---------------------------------------------------------------------------
 // StemMixer — Stem volume sliders + loop controls
@@ -9,7 +9,13 @@ use crate::pages::visualization::VizContext;
 
 #[component]
 pub fn StemMixer() -> impl IntoView {
-    let viz = use_context::<VizContext>().expect("VizContext missing");
+    let global    = use_context::<GlobalPlayback>().expect("GlobalPlayback missing");
+    let viz_state = use_context::<VisualizationPageState>().expect("VisualizationPageState missing");
+
+    let stems_available = global.stems_available.read_only();
+    let stem_volumes    = viz_state.stem_volumes.read_only();
+    let set_stem_volumes = viz_state.stem_volumes.write_only();
+    let stem_gains      = global.stem_gains;
 
     view! {
         <div class="flex flex-col gap-4 text-sm">
@@ -18,7 +24,7 @@ pub fn StemMixer() -> impl IntoView {
                 <div class="flex items-center justify-between mb-1">
                     <h3 class="text-xs font-semibold text-gray-400 uppercase tracking-wider">"Stem Mixer"</h3>
                     {move || {
-                        if !viz.stems_available.get() {
+                        if !stems_available.get() {
                             Some(view! {
                                 <span class="text-xs bg-gray-700 text-gray-400 px-2 py-0.5 rounded-full">"Visual only"</span>
                             })
@@ -31,14 +37,13 @@ pub fn StemMixer() -> impl IntoView {
                 <StemSlider
                     label="Vocals"
                     icon="🎤"
-                    get_vol=move || viz.stem_volumes.get().vocals
+                    get_vol=move || stem_volumes.get().vocals
                     set_vol={
-                        let viz = viz.clone();
                         move |v: f64| {
-                            let mut vols = viz.stem_volumes.get();
+                            let mut vols = stem_volumes.get();
                             vols.vocals = v;
-                            viz.set_stem_volumes.set(vols);
-                            if let Some(gains) = viz.stem_gains.get_value() {
+                            set_stem_volumes.set(vols);
+                            if let Some(gains) = stem_gains.get_value() {
                                 gains.vocals.gain().set_value(v as f32);
                             }
                         }
@@ -47,14 +52,13 @@ pub fn StemMixer() -> impl IntoView {
                 <StemSlider
                     label="Drums"
                     icon="🥁"
-                    get_vol=move || viz.stem_volumes.get().drums
+                    get_vol=move || stem_volumes.get().drums
                     set_vol={
-                        let viz = viz.clone();
                         move |v: f64| {
-                            let mut vols = viz.stem_volumes.get();
+                            let mut vols = stem_volumes.get();
                             vols.drums = v;
-                            viz.set_stem_volumes.set(vols);
-                            if let Some(gains) = viz.stem_gains.get_value() {
+                            set_stem_volumes.set(vols);
+                            if let Some(gains) = stem_gains.get_value() {
                                 gains.drums.gain().set_value(v as f32);
                             }
                         }
@@ -63,14 +67,13 @@ pub fn StemMixer() -> impl IntoView {
                 <StemSlider
                     label="Bass"
                     icon="🎸"
-                    get_vol=move || viz.stem_volumes.get().bass
+                    get_vol=move || stem_volumes.get().bass
                     set_vol={
-                        let viz = viz.clone();
                         move |v: f64| {
-                            let mut vols = viz.stem_volumes.get();
+                            let mut vols = stem_volumes.get();
                             vols.bass = v;
-                            viz.set_stem_volumes.set(vols);
-                            if let Some(gains) = viz.stem_gains.get_value() {
+                            set_stem_volumes.set(vols);
+                            if let Some(gains) = stem_gains.get_value() {
                                 gains.bass.gain().set_value(v as f32);
                             }
                         }
@@ -79,14 +82,13 @@ pub fn StemMixer() -> impl IntoView {
                 <StemSlider
                     label="Others"
                     icon="🎹"
-                    get_vol=move || viz.stem_volumes.get().others
+                    get_vol=move || stem_volumes.get().others
                     set_vol={
-                        let viz = viz.clone();
                         move |v: f64| {
-                            let mut vols = viz.stem_volumes.get();
+                            let mut vols = stem_volumes.get();
                             vols.others = v;
-                            viz.set_stem_volumes.set(vols);
-                            if let Some(gains) = viz.stem_gains.get_value() {
+                            set_stem_volumes.set(vols);
+                            if let Some(gains) = stem_gains.get_value() {
                                 gains.others.gain().set_value(v as f32);
                             }
                         }
@@ -195,7 +197,9 @@ where
 
 #[component]
 fn BeatOffsetControl() -> impl IntoView {
-    let viz = use_context::<VizContext>().expect("VizContext missing");
+    let viz_state = use_context::<VisualizationPageState>().expect("VisualizationPageState missing");
+    let beat_offset     = viz_state.beat_offset.read_only();
+    let set_beat_offset = viz_state.beat_offset.write_only();
 
     let on_input = move |ev: web_sys::Event| {
         let val: f64 = ev
@@ -205,11 +209,11 @@ fn BeatOffsetControl() -> impl IntoView {
             .unwrap_or_default()
             .parse()
             .unwrap_or(0.0);
-        viz.set_beat_offset.set(val);
+        set_beat_offset.set(val);
     };
 
     let on_reset = move |_| {
-        viz.set_beat_offset.set(0.0);
+        set_beat_offset.set(0.0);
     };
 
     view! {
@@ -227,7 +231,7 @@ fn BeatOffsetControl() -> impl IntoView {
                 max="0.5"
                 step="0.01"
                 class="w-full accent-orange-500 h-1"
-                prop:value=move || viz.beat_offset.get().to_string()
+                prop:value=move || beat_offset.get().to_string()
                 on:input=on_input
             />
             <div class="flex justify-between text-xs text-gray-600 mt-0.5">
@@ -237,7 +241,7 @@ fn BeatOffsetControl() -> impl IntoView {
             </div>
             <p class="text-center font-mono text-sm text-orange-400 mt-1">
                 {move || {
-                    let v = viz.beat_offset.get();
+                    let v = beat_offset.get();
                     if v >= 0.0 { format!("+{:.2}s", v) } else { format!("{:.2}s", v) }
                 }}
             </p>
@@ -254,36 +258,38 @@ fn LoopControls() -> impl IntoView {
     use crate::components::player::PlaybackContext;
     use crate::types::format_time;
 
-    let ctx = use_context::<PlaybackContext>().expect("PlaybackContext missing");
-    let viz = use_context::<VizContext>().expect("VizContext missing");
+    let ctx       = use_context::<PlaybackContext>().expect("PlaybackContext missing");
+    let viz_state = use_context::<VisualizationPageState>().expect("VisualizationPageState missing");
 
-    let set_loop_start = move |_| {
+    let loop_start     = viz_state.loop_start.read_only();
+    let loop_end       = viz_state.loop_end.read_only();
+    let loop_active    = viz_state.loop_active.read_only();
+    let set_loop_start = viz_state.loop_start.write_only();
+    let set_loop_end   = viz_state.loop_end.write_only();
+    let set_loop_active = viz_state.loop_active.write_only();
+    let set_selected   = viz_state.selected_segment_indices.write_only();
+
+    let set_loop_start_btn = move |_| {
         let t = ctx.current_time.get();
-        viz.set_loop_start.set(Some(t));
-        viz.set_loop_active.set(true);
+        set_loop_start.set(Some(t));
+        set_loop_active.set(true);
     };
 
-    let set_loop_end = move |_| {
+    let set_loop_end_btn = move |_| {
         let t = ctx.current_time.get();
-        viz.set_loop_end.set(Some(t));
-        viz.set_loop_active.set(true);
+        set_loop_end.set(Some(t));
+        set_loop_active.set(true);
     };
 
-    let toggle_loop = {
-        let viz = viz.clone();
-        move |_| {
-            viz.set_loop_active.update(|v| *v = !*v);
-        }
+    let toggle_loop = move |_| {
+        set_loop_active.update(|v| *v = !*v);
     };
 
-    let clear_loop = {
-        let viz = viz.clone();
-        move |_| {
-            viz.set_loop_start.set(None);
-            viz.set_loop_end.set(None);
-            viz.set_loop_active.set(false);
-            viz.set_selected_segment_indices.set(vec![]);
-        }
+    let clear_loop = move |_| {
+        set_loop_start.set(None);
+        set_loop_end.set(None);
+        set_loop_active.set(false);
+        set_selected.set(vec![]);
     };
 
     view! {
@@ -294,14 +300,14 @@ fn LoopControls() -> impl IntoView {
             <div class="flex gap-2">
                 <button
                     class="flex-1 text-xs bg-gray-700 hover:bg-gray-600 text-gray-200 rounded px-2 py-1.5 transition-colors"
-                    on:click=set_loop_start
+                    on:click=set_loop_start_btn
                     title="Set current position as loop start"
                 >
                     "◀ Start"
                 </button>
                 <button
                     class="flex-1 text-xs bg-gray-700 hover:bg-gray-600 text-gray-200 rounded px-2 py-1.5 transition-colors"
-                    on:click=set_loop_end
+                    on:click=set_loop_end_btn
                     title="Set current position as loop end"
                 >
                     "End ▶"
@@ -311,15 +317,15 @@ fn LoopControls() -> impl IntoView {
             // Loop range display
             <div class="flex items-center gap-1 text-xs font-mono text-gray-400">
                 <span class=move || {
-                    if viz.loop_start.get().is_some() { "text-orange-400" } else { "text-gray-600" }
+                    if loop_start.get().is_some() { "text-orange-400" } else { "text-gray-600" }
                 }>
-                    {move || viz.loop_start.get().map(format_time).unwrap_or_else(|| "--:--".into())}
+                    {move || loop_start.get().map(format_time).unwrap_or_else(|| "--:--".into())}
                 </span>
                 <span class="flex-1 text-center text-gray-600">"───────"</span>
                 <span class=move || {
-                    if viz.loop_end.get().is_some() { "text-orange-400" } else { "text-gray-600" }
+                    if loop_end.get().is_some() { "text-orange-400" } else { "text-gray-600" }
                 }>
-                    {move || viz.loop_end.get().map(format_time).unwrap_or_else(|| "--:--".into())}
+                    {move || loop_end.get().map(format_time).unwrap_or_else(|| "--:--".into())}
                 </span>
             </div>
 
@@ -327,7 +333,7 @@ fn LoopControls() -> impl IntoView {
             <div class="flex gap-2">
                 <button
                     class=move || {
-                        if viz.loop_active.get() {
+                        if loop_active.get() {
                             "flex-1 text-xs rounded px-2 py-1.5 font-semibold bg-orange-600 hover:bg-orange-500 text-white transition-colors"
                         } else {
                             "flex-1 text-xs rounded px-2 py-1.5 font-semibold bg-gray-700 hover:bg-gray-600 text-gray-300 transition-colors"
@@ -335,7 +341,7 @@ fn LoopControls() -> impl IntoView {
                     }
                     on:click=toggle_loop
                 >
-                    {move || if viz.loop_active.get() { "Loop: ON" } else { "Loop: OFF" }}
+                    {move || if loop_active.get() { "Loop: ON" } else { "Loop: OFF" }}
                 </button>
                 <button
                     class="text-xs bg-gray-700 hover:bg-red-900/60 text-gray-400 hover:text-red-300 rounded px-3 py-1.5 transition-colors"

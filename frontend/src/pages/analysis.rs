@@ -1,6 +1,8 @@
 use crate::{
     api,
+    audio_setup::{setup_stem_handoff_effect, setup_switch_song_effect, use_playback_polling},
     components::{
+        error_display::ErrorPanel,
         player::{AudioEngine, PlaybackContext, Player},
         section_card::SectionCard,
         stem_mixer::StemMixer,
@@ -12,14 +14,13 @@ use crate::{
 };
 use leptos::*;
 use leptos_router::*;
+use wasm_bindgen::JsCast;
+use wasm_bindgen_futures::JsFuture;
 
 // Helper: build the /visualization/:stem URL from current route params
 fn visualization_href(stem: &str) -> String {
     format!("/visualization/{}", js_sys::encode_uri_component(stem).as_string().unwrap_or_default())
 }
-use leptos_use::use_interval_fn;
-use wasm_bindgen::JsCast;
-use wasm_bindgen_futures::JsFuture;
 
 #[component]
 pub fn Analysis() -> impl IntoView {
@@ -52,65 +53,20 @@ pub fn Analysis() -> impl IntoView {
         }
     });
 
-    // GlobalPlayback のシグナルを PlaybackContext 用に read/write 分割
-    let current_time  = global.current_time.read_only();
-    let set_current_time = global.current_time.write_only();
-    let is_playing    = global.is_playing.read_only();
-    let set_is_playing = global.is_playing.write_only();
-    let duration      = global.duration.read_only();
-    let set_duration  = global.duration.write_only();
-    let volume        = global.volume.read_only();
-    let set_volume    = global.volume.write_only();
-    let engine        = global.engine;
-
-    // VizContext 用シグナル（エフェメラル — AnalysisページではVizCanvasを使わないため未更新）
-    let (energy, set_energy) = create_signal(0.5_f64);
-    let (density, set_density) = create_signal(0.5_f64);
-    let (current_hue, set_current_hue) = create_signal(220.0_f64);
-    let (beat_trigger, set_beat_trigger) = create_signal(0u32);
-    let (downbeat_trigger, set_downbeat_trigger) = create_signal(0u32);
-    // VisualizationPageState から永続設定を取得
-    let stem_volumes     = viz_page_state.stem_volumes.read_only();
-    let set_stem_volumes = viz_page_state.stem_volumes.write_only();
-    let loop_start       = viz_page_state.loop_start.read_only();
-    let set_loop_start   = viz_page_state.loop_start.write_only();
-    let loop_end         = viz_page_state.loop_end.read_only();
-    let set_loop_end     = viz_page_state.loop_end.write_only();
-    let loop_active      = viz_page_state.loop_active.read_only();
-    let set_loop_active  = viz_page_state.loop_active.write_only();
-    let selected_segment_indices     = viz_page_state.selected_segment_indices.read_only();
-    let set_selected_segment_indices = viz_page_state.selected_segment_indices.write_only();
-    let beat_offset      = viz_page_state.beat_offset.read_only();
-    let set_beat_offset  = viz_page_state.beat_offset.write_only();
-    // GlobalPlayback から stems シグナル
-    let stems_available     = global.stems_available.read_only();
-    let set_stems_available = global.stems_available.write_only();
-    let stems_loading       = global.stems_loading;
+    // UI 表示用
+    let stems_loading = global.stems_loading;
+    let stems_error   = global.stems_error;
 
     // ローディング状態（楽曲データ or ステム）
     let any_loading = move || {
         track_data.loading().get() || audio_buffer_res.loading().get() || stems_loading.get()
     };
     let loading_message = move || {
-        if stems_loading.get() {
-            "ステム読み込み中..."
-        } else {
-            "楽曲データ読み込み中..."
-        }
+        if stems_loading.get() { "ステム読み込み中..." } else { "楽曲データ読み込み中..." }
     };
 
     // 楽曲切り替えを stem() の変化から即座に検出して音量を UI に反映
-    create_effect({
-        let global = global.clone();
-        let viz_page_state = viz_page_state.clone();
-        move |_| {
-            let s = stem();
-            let old = global.loaded_stem.get_untracked();
-            if s == old { return; }
-            let audio_state = viz_page_state.switch_song(&old, &s, global.volume.get_untracked());
-            global.volume.set(audio_state.master_volume);
-        }
-    });
+    setup_switch_song_effect(global.clone(), viz_page_state.clone(), stem);
 
     // 新規ロード時のみエンジンを作成してグローバルに保存し、ステムをバックグラウンドロード
     create_effect({
@@ -137,115 +93,21 @@ pub fn Analysis() -> impl IntoView {
     });
 
     // ステムが利用可能になったら AudioEngine をミュート・停止し StemAudioEngine に引き継ぐ
-    create_effect({
-        let global = global.clone();
-        let viz_page_state = viz_page_state.clone();
-        move |_| {
-            if !global.stems_available.get() { return; }
-            // 復元された stem volumes を新しい GainNode に適用（UI と音声を同期）
-            let vols = viz_page_state.stem_volumes.get_untracked();
-            if let Some(gains) = global.stem_gains.get_value() {
-                gains.vocals.gain().set_value(vols.vocals as f32);
-                gains.drums.gain().set_value(vols.drums as f32);
-                gains.bass.gain().set_value(vols.bass as f32);
-                gains.others.gain().set_value(vols.others as f32);
-            }
-            // engine がまだ再生中の場合のみ引き継ぎ（ナビゲーション時の二重実行防止）
-            let eng_playing = global.engine.get_value().map(|e| e.is_playing()).unwrap_or(false);
-            if !eng_playing {
-                if let Some(eng) = global.engine.get_value() { eng.set_volume(0.0); }
-                return;
-            }
-            let was_playing = global.is_playing.get_untracked();
-            let t = global.engine.get_value()
-                .map(|e| e.current_time())
-                .unwrap_or_else(|| global.current_time.get_untracked());
-            if let Some(eng) = global.engine.get_value() {
-                eng.set_volume(0.0);
-                eng.pause();
-            }
-            if let Some(stem_eng) = global.stem_engine.get_value() {
-                stem_eng.seek(t);
-                if was_playing {
-                    spawn_local(async move {
-                        stem_eng.resume_ctx().await;
-                        stem_eng.play();
-                    });
-                }
-            }
-        }
-    });
+    setup_stem_handoff_effect(global.clone(), viz_page_state.clone());
 
-    // 100ms ポーリング（再生位置更新 + ループ制御）
-    // stem_engine が利用可能な場合はそちらを優先して参照する
-    let stem_engine_sv = global.stem_engine;
-    use_interval_fn(move || {
-        let (t, eng_is_playing, eng_dur) = if let Some(s) = stem_engine_sv.get_value() {
-            (s.current_time(), s.is_playing(), s.duration())
-        } else if let Some(e) = engine.get_value() {
-            (e.current_time(), e.is_playing(), e.duration())
-        } else {
-            return;
-        };
-        set_current_time.set(t);
-        if eng_is_playing && t >= eng_dur - 0.05 {
-            if let Some(s) = stem_engine_sv.get_value() { s.pause(); }
-            if let Some(e) = engine.get_value() { e.pause(); }
-            set_is_playing.set(false);
-            set_current_time.set(0.0);
-        } else if loop_active.get() {
-            if let (Some(ls), Some(le)) = (loop_start.get(), loop_end.get()) {
-                if ls < le && t >= le {
-                    if let Some(s) = stem_engine_sv.get_value() { s.seek(ls); }
-                    else if let Some(e) = engine.get_value() { e.seek(ls); }
-                    set_current_time.set(ls);
-                }
-            }
-        }
-    }, 100);
-
-    // current_segment_idx derived from current_time + segment list
+    // current_segment_idx: 再生位置からセグメントインデックスを導出
+    let ct = global.current_time;
     let current_segment_idx = create_memo(move |_| {
-        let t = current_time.get();
-        track_data
-            .get()
-            .and_then(|r| r.ok())
-            .and_then(|track| {
-                track.segments.iter().position(|seg| t >= seg.start && t < seg.end)
-            })
+        let t = ct.get();
+        track_data.get().and_then(|r| r.ok()).and_then(|track| {
+            track.segments.iter().position(|seg| t >= seg.start && t < seg.end)
+        })
     });
 
-    provide_context(PlaybackContext {
-        current_time,
-        set_current_time,
-        is_playing,
-        set_is_playing,
-        duration,
-        set_duration,
-        volume,
-        set_volume,
-        current_segment_idx,
-        engine,
-        stem_engine: global.stem_engine,
-        stem_gains:  global.stem_gains,
-    });
-
-    provide_context(VizContext {
-        energy, set_energy,
-        density, set_density,
-        current_hue, set_current_hue,
-        beat_trigger, set_beat_trigger,
-        downbeat_trigger, set_downbeat_trigger,
-        stem_volumes, set_stem_volumes,
-        stems_available, set_stems_available,
-        loop_start, set_loop_start,
-        loop_end, set_loop_end,
-        loop_active, set_loop_active,
-        selected_segment_indices, set_selected_segment_indices,
-        stem_gains: global.stem_gains,
-        stem_engine: global.stem_engine,
-        beat_offset, set_beat_offset,
-    });
+    // PlaybackContext・VizContext を provide し、ポーリングフックを登録
+    provide_context(PlaybackContext::new(&global, current_segment_idx));
+    provide_context(VizContext::new_dummy());
+    use_playback_polling(global.clone(), viz_page_state.clone(), |_| {});
 
     view! {
         <div class="flex flex-col h-screen bg-gray-950 overflow-hidden relative">
@@ -255,6 +117,17 @@ pub fn Analysis() -> impl IntoView {
                     <div class="bg-gray-800 rounded-xl p-8 border border-gray-700 flex flex-col items-center gap-4">
                         <div class="w-10 h-10 border-4 border-orange-500 border-t-transparent rounded-full animate-spin" />
                         <p class="text-gray-200 font-medium">{loading_message()}</p>
+                    </div>
+                </div>
+            })}
+            // ステムロードエラーバナー（非ブロッキング）
+            {move || stems_error.get().map(|e| view! {
+                <div class="absolute inset-x-0 top-0 z-40 mx-auto max-w-lg mt-4 px-4">
+                    <div class="bg-red-900/80 border border-red-700 rounded-xl p-4 flex items-start gap-3">
+                        <p class="text-red-300 text-sm flex-1">
+                            <span class="font-medium text-red-200">"Stem load failed: "</span>
+                            {e}
+                        </p>
                     </div>
                 </div>
             })}
@@ -288,12 +161,7 @@ pub fn Analysis() -> impl IntoView {
                             }.into_view()
                         },
                         Err(e) => view! {
-                            <div class="flex items-center justify-center h-full">
-                                <div class="bg-red-900/30 border border-red-700 rounded-xl p-6 max-w-md">
-                                    <p class="text-red-400 font-medium mb-1">"Failed to load track"</p>
-                                    <p class="text-red-300 text-sm">{e}</p>
-                                </div>
-                            </div>
+                            <ErrorPanel title="Failed to load track" message=e />
                         }.into_view(),
                     }
                 })}

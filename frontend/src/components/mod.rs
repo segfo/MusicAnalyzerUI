@@ -1,3 +1,4 @@
+pub mod error_display;
 pub mod player;
 pub mod section_card;
 pub mod stem_mixer;

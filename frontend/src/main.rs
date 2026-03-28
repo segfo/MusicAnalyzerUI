@@ -1,4 +1,6 @@
 mod api;
+mod audio;
+mod audio_setup;
 mod components;
 mod pages;
 mod state;

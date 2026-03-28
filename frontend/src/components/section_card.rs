@@ -1,8 +1,8 @@
 use crate::components::player::PlaybackContext;
 use crate::types::{format_time, segment_color, SegmentResult, TrackDataset};
 use leptos::*;
-use wasm_bindgen::prelude::*;
-use wasm_bindgen::JsCast;
+use leptos::leptos_dom::helpers::{set_timeout_with_handle, TimeoutHandle};
+use std::time::Duration;
 
 /// viewport 上の list_id 要素 top と card_id 要素 top の差を返す
 fn measure_delta_y(list_id: &str, card_id: &str) -> f64 {
@@ -29,6 +29,13 @@ pub fn SectionCard(track: TrackDataset) -> impl IntoView {
     let (anim_style, set_anim_style) = create_signal("opacity:0;pointer-events:none".to_string());
     // 高速切替時の stale closure 防止カウンタ
     let (anim_gen, set_anim_gen) = create_signal(0u32);
+    // 保留中のタイムアウトハンドル（コンポーネントアンマウント時にキャンセル）
+    let timeout_handle: StoredValue<Option<TimeoutHandle>> = store_value(None);
+    on_cleanup(move || {
+        if let Some(h) = timeout_handle.get_value() {
+            h.clear();
+        }
+    });
 
     // セグメント変更時のアニメーション制御
     create_effect(move |_| {
@@ -74,21 +81,15 @@ pub fn SectionCard(track: TrackDataset) -> impl IntoView {
             ));
 
             // 310ms後に Enter アニメーション
-            let closure = Closure::once(move || {
+            // 前回の保留タイムアウトをキャンセルしてから新しいものを登録
+            if let Some(h) = timeout_handle.get_value() { h.clear(); }
+            timeout_handle.set_value(set_timeout_with_handle(move || {
                 if anim_gen.get_untracked() == gen {
                     set_anim_style.set(format!(
                         "--from-y:{from_y}px;animation:cardEnter 0.35s ease-out both;pointer-events:auto"
                     ));
                 }
-            });
-            web_sys::window()
-                .unwrap()
-                .set_timeout_with_callback_and_timeout_and_arguments_0(
-                    closure.as_ref().unchecked_ref(),
-                    310,
-                )
-                .unwrap();
-            closure.forget();
+            }, Duration::from_millis(310)).ok());
         } else if old_valid && !new_valid {
             // Leave してそのまま非表示
             let to_y = seg_struct_index(old_idx).map_or(0.0, |id| {
@@ -97,20 +98,13 @@ pub fn SectionCard(track: TrackDataset) -> impl IntoView {
             set_anim_style.set(format!(
                 "--to-y:{to_y}px;animation:cardLeave 0.3s ease-in both"
             ));
-            let closure = Closure::once(move || {
+            if let Some(h) = timeout_handle.get_value() { h.clear(); }
+            timeout_handle.set_value(set_timeout_with_handle(move || {
                 if anim_gen.get_untracked() == gen {
                     set_card_open.set(false);
                     set_anim_style.set("opacity:0;pointer-events:none".to_string());
                 }
-            });
-            web_sys::window()
-                .unwrap()
-                .set_timeout_with_callback_and_timeout_and_arguments_0(
-                    closure.as_ref().unchecked_ref(),
-                    310,
-                )
-                .unwrap();
-            closure.forget();
+            }, Duration::from_millis(310)).ok());
         } else if !old_valid && new_valid {
             // 初回表示: リストアイテム位置から Enter
             let from_y = seg_struct_index(new_idx).map_or(0.0, |id| {

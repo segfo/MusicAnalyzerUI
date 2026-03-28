@@ -1,5 +1,5 @@
 use crate::components::player::PlaybackContext;
-use crate::pages::visualization::VizContext;
+use crate::state::VisualizationPageState;
 use crate::types::{segment_color, TrackDataset};
 use leptos::*;
 use leptos::html::Div;
@@ -12,23 +12,31 @@ use leptos::html::Div;
 //   Shift+クリック: クリック位置にシーク
 //   Ctrl+クリック : セクション選択 ON/OFF → ループゾーン自動更新
 //
-// ループオーバーレイ: VizContext の loop_start / loop_end / loop_active を参照
+// ループオーバーレイ: VisualizationPageState の loop_start / loop_end / loop_active を参照
 // ---------------------------------------------------------------------------
 
 #[component]
 pub fn Timeline(track: TrackDataset) -> impl IntoView {
-    let ctx = use_context::<PlaybackContext>().expect("PlaybackContext missing");
-    let viz = use_context::<VizContext>().expect("VizContext missing");
+    let ctx       = use_context::<PlaybackContext>().expect("PlaybackContext missing");
+    let viz_state = use_context::<VisualizationPageState>().expect("VisualizationPageState missing");
     let stem_engine_sv = ctx.stem_engine;
     let segments = track.segments.clone();
     let timeline_ref = create_node_ref::<Div>();
 
+    let loop_start              = viz_state.loop_start.read_only();
+    let loop_end                = viz_state.loop_end.read_only();
+    let loop_active             = viz_state.loop_active.read_only();
+    let selected_segment_indices     = viz_state.selected_segment_indices.read_only();
+    let set_selected_segment_indices = viz_state.selected_segment_indices.write_only();
+    let set_loop_start          = viz_state.loop_start.write_only();
+    let set_loop_end            = viz_state.loop_end.write_only();
+    let set_loop_active         = viz_state.loop_active.write_only();
+
     // セクション選択が変わったらループゾーンを自動更新
     {
-        let viz = viz.clone();
         let segs = track.segments.clone();
         create_effect(move |_| {
-            let indices = viz.selected_segment_indices.get();
+            let indices = selected_segment_indices.get();
             if indices.is_empty() { return; }
             let selected: Vec<_> = segs.iter()
                 .filter(|s| indices.contains(&s.index))
@@ -36,9 +44,9 @@ pub fn Timeline(track: TrackDataset) -> impl IntoView {
             if selected.is_empty() { return; }
             let min_start = selected.iter().map(|s| s.start).fold(f64::INFINITY, f64::min);
             let max_end   = selected.iter().map(|s| s.end).fold(f64::NEG_INFINITY, f64::max);
-            viz.set_loop_start.set(Some(min_start));
-            viz.set_loop_end.set(Some(max_end));
-            viz.set_loop_active.set(true);
+            set_loop_start.set(Some(min_start));
+            set_loop_end.set(Some(max_end));
+            set_loop_active.set(true);
         });
     }
 
@@ -70,7 +78,6 @@ pub fn Timeline(track: TrackDataset) -> impl IntoView {
                 key=|seg| seg.index
                 children={
                     let ctx = ctx.clone();
-                    let viz = viz.clone();
                     move |seg: crate::types::SegmentResult| {
                         let dur_s    = ctx.duration;
                         let seg_start = seg.start;
@@ -82,14 +89,13 @@ pub fn Timeline(track: TrackDataset) -> impl IntoView {
                         let eng       = ctx.engine;
                         let stem_eng  = ctx.stem_engine;
                         let set_t     = ctx.set_current_time;
-                        let viz2      = viz.clone();
                         let current_time = ctx.current_time;
                         let seg_end   = seg.end;
 
                         view! {
                             <div
                                 class=move || {
-                                    let sel = viz2.selected_segment_indices.get().contains(&seg_idx);
+                                    let sel = selected_segment_indices.get().contains(&seg_idx);
                                     let t   = current_time.get();
                                     let playing = t >= seg_start && t < seg_end;
                                     format!(
@@ -109,7 +115,7 @@ pub fn Timeline(track: TrackDataset) -> impl IntoView {
                                 on:click=move |ev: web_sys::MouseEvent| {
                                     if ev.ctrl_key() || ev.meta_key() {
                                         // Ctrl+click: セクション選択トグル
-                                        viz.set_selected_segment_indices.update(|ids| {
+                                        set_selected_segment_indices.update(|ids| {
                                             if let Some(pos) = ids.iter().position(|&i| i == seg_idx) {
                                                 ids.remove(pos);
                                             } else {
@@ -140,7 +146,7 @@ pub fn Timeline(track: TrackDataset) -> impl IntoView {
             {move || {
                 let d = ctx.duration.get();
                 if let (Some(ls), Some(le), true, true) = (
-                    viz.loop_start.get(), viz.loop_end.get(), viz.loop_active.get(), d > 0.0
+                    loop_start.get(), loop_end.get(), loop_active.get(), d > 0.0
                 ) {
                     if le > ls {
                         let left_pct  = ls / d * 100.0;

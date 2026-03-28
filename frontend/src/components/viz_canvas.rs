@@ -1,13 +1,15 @@
 use leptos::*;
 use leptos::html::Canvas;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::f64::consts::PI;
 use std::rc::Rc;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use web_sys::{CanvasRenderingContext2d, HtmlCanvasElement};
 
+use crate::audio::StemVolumes;
 use crate::pages::visualization::VizContext;
+use crate::state::VisualizationPageState;
 
 // ---------------------------------------------------------------------------
 // Internal animation state (lives inside the rAF closure)
@@ -36,6 +38,7 @@ struct AnimState {
     density: f64,
     target_density: f64,
     particles: Vec<Particle>,
+    chord_label: String,
     // pseudo-random state (simple LCG)
     rng: u64,
 }
@@ -53,6 +56,7 @@ impl AnimState {
             density: 0.5,
             target_density: 0.5,
             particles: Vec::with_capacity(200),
+            chord_label: String::new(),
             rng: 12345,
         }
     }
@@ -75,14 +79,22 @@ impl AnimState {
 pub fn VizCanvas() -> impl IntoView {
     let canvas_ref = create_node_ref::<Canvas>();
     let viz = use_context::<VizContext>().expect("VizContext missing");
+    let viz_state = use_context::<VisualizationPageState>().expect("VisualizationPageState missing");
 
-    // Start the rAF loop once the canvas is mounted
+    // Start the rAF loop once the canvas is mounted; cancel it on unmount
     create_effect({
         let viz = viz.clone();
+        let stem_volumes = viz_state.stem_volumes.read_only();
         move |_| {
             let Some(canvas_el) = canvas_ref.get() else { return };
             let canvas = canvas_el.unchecked_ref::<HtmlCanvasElement>().clone();
-            start_animation_loop(canvas, viz.clone());
+            let (alive, raf_id) = start_animation_loop(canvas, viz.clone(), stem_volumes);
+            on_cleanup(move || {
+                alive.set(false);
+                if let Some(win) = web_sys::window() {
+                    let _ = win.cancel_animation_frame(raf_id.get());
+                }
+            });
         }
     });
 
@@ -111,8 +123,13 @@ pub fn VizCanvas() -> impl IntoView {
 // rAF loop setup
 // ---------------------------------------------------------------------------
 
-fn start_animation_loop(canvas: HtmlCanvasElement, viz: VizContext) {
+fn start_animation_loop(canvas: HtmlCanvasElement, viz: VizContext, stem_volumes: ReadSignal<StemVolumes>) -> (Rc<Cell<bool>>, Rc<Cell<i32>>) {
     let state = Rc::new(RefCell::new(AnimState::new()));
+
+    // alive flag: set to false by on_cleanup to stop the loop
+    let alive = Rc::new(Cell::new(true));
+    // latest rAF ID: used by on_cleanup to cancel a scheduled-but-not-yet-run frame
+    let raf_id: Rc<Cell<i32>> = Rc::new(Cell::new(0));
 
     // Signals: beat/downbeat triggers (u32 counter — increments fire pulses)
     let prev_beat = Rc::new(RefCell::new(0u32));
@@ -127,7 +144,7 @@ fn start_animation_loop(canvas: HtmlCanvasElement, viz: VizContext) {
             let p = *prev.borrow();
             if cur != p {
                 *prev.borrow_mut() = cur;
-                let sv = viz.stem_volumes.get();
+                let sv = stem_volumes.get();
                 state_b.borrow_mut().beat_pulse = sv.drums;
                 state_b.borrow_mut().distortion_seed = sv.vocals;
             }
@@ -141,7 +158,7 @@ fn start_animation_loop(canvas: HtmlCanvasElement, viz: VizContext) {
             let p = *prev.borrow();
             if cur != p {
                 *prev.borrow_mut() = cur;
-                let sv = viz.stem_volumes.get();
+                let sv = stem_volumes.get();
                 state_db.borrow_mut().downbeat_pulse = sv.bass;
             }
         });
@@ -163,13 +180,26 @@ fn start_animation_loop(canvas: HtmlCanvasElement, viz: VizContext) {
             s.target_density = d;
         });
     }
+    {
+        let state_ch = state.clone();
+        create_effect(move |_| {
+            let label = viz.current_chord.get();
+            state_ch.borrow_mut().chord_label = label;
+        });
+    }
 
     // Build rAF closure
     let f: Rc<RefCell<Option<Closure<dyn FnMut()>>>> = Rc::new(RefCell::new(None));
     let g = f.clone();
 
-    let viz_for_draw = viz.clone();
+    let alive_inner = alive.clone();
+    let raf_id_inner = raf_id.clone();
     *g.borrow_mut() = Some(Closure::new(move || {
+        // Stop the loop if the component has been unmounted
+        if !alive_inner.get() {
+            return;
+        }
+
         // Sync canvas size to CSS layout
         let w = canvas.offset_width() as u32;
         let h = canvas.offset_height() as u32;
@@ -185,22 +215,26 @@ fn start_animation_loop(canvas: HtmlCanvasElement, viz: VizContext) {
             .and_then(|o| o.dyn_into::<CanvasRenderingContext2d>().ok())
             .ok_or(())
         {
-            let sv = viz_for_draw.stem_volumes.get();
+            let sv = stem_volumes.get();
             render_frame(&ctx, &mut state.borrow_mut(), w as f64, h as f64, sv);
         }
 
-        // Schedule next frame
-        request_animation_frame(f.borrow().as_ref().unwrap());
+        // Schedule next frame; store the ID so it can be cancelled
+        let id = request_animation_frame(f.borrow().as_ref().unwrap());
+        raf_id_inner.set(id);
     }));
 
-    request_animation_frame(g.borrow().as_ref().unwrap());
+    let id = request_animation_frame(g.borrow().as_ref().unwrap());
+    raf_id.set(id);
+
+    (alive, raf_id)
 }
 
-fn request_animation_frame(f: &Closure<dyn FnMut()>) {
+fn request_animation_frame(f: &Closure<dyn FnMut()>) -> i32 {
     web_sys::window()
         .expect("no window")
         .request_animation_frame(f.as_ref().unchecked_ref())
-        .expect("requestAnimationFrame failed");
+        .expect("requestAnimationFrame failed")
 }
 
 // ---------------------------------------------------------------------------
@@ -212,7 +246,7 @@ fn render_frame(
     state: &mut AnimState,
     w: f64,
     h: f64,
-    sv: crate::pages::visualization::StemVolumes,
+    sv: StemVolumes,
 ) {
     let cx = w / 2.0;
     let cy = h / 2.0;
@@ -298,7 +332,17 @@ fn render_frame(
     spawn_particles(state, cx, cy, base_r, sv);
     draw_particles(ctx, state, w, h);
 
-    // --- 5. Decay ---
+    // --- 5. Chord name at center ---
+    if !state.chord_label.is_empty() {
+        let font_size = (base_r * 0.55).round() as u32;
+        ctx.set_font(&format!("bold {}px sans-serif", font_size));
+        ctx.set_text_align("center");
+        ctx.set_text_baseline("middle");
+        ctx.set_fill_style_str(&format!("hsla({:.0},60%,90%,0.85)", state.hue));
+        let _ = ctx.fill_text(&state.chord_label, cx, cy);
+    }
+
+    // --- 6. Decay ---
     state.beat_pulse *= 0.85;
     state.downbeat_pulse *= 0.88;
     state.distortion_seed *= 0.80;
@@ -307,7 +351,7 @@ fn render_frame(
     if state.distortion_seed < 0.001 { state.distortion_seed = 0.0; }
 }
 
-fn spawn_particles(state: &mut AnimState, cx: f64, cy: f64, base_r: f64, sv: crate::pages::visualization::StemVolumes) {
+fn spawn_particles(state: &mut AnimState, cx: f64, cy: f64, base_r: f64, sv: StemVolumes) {
     let max_particles = 300usize;
 
     // Beat burst: on every beat_pulse the count spikes, tapers between beats.
