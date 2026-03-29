@@ -215,7 +215,7 @@ fn start_animation_loop(canvas: HtmlCanvasElement, viz: VizContext, stem_volumes
             .and_then(|o| o.dyn_into::<CanvasRenderingContext2d>().ok())
             .ok_or(())
         {
-            let sv = stem_volumes.get();
+            let sv = stem_volumes.get_untracked();
             render_frame(&ctx, &mut state.borrow_mut(), w as f64, h as f64, sv);
         }
 

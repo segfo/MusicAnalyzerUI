@@ -6,6 +6,8 @@ dist = "dist"
 port = 8080
 open = false
 
+# Web開発時: /api/* を Python バックエンド (port 7777) にプロキシする
 [[proxy]]
 backend = "http://127.0.0.1:7777/api/"
 rewrite = "/api/"
+

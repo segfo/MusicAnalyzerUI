@@ -1084,6 +1084,7 @@ dependencies = [
  "leptos-use",
  "leptos_router",
  "serde",
+ "serde-wasm-bindgen",
  "serde_json",
  "wasm-bindgen",
  "wasm-bindgen-futures",
