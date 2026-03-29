@@ -13,9 +13,11 @@ pub fn StemMixer() -> impl IntoView {
     let viz_state = use_context::<VisualizationPageState>().expect("VisualizationPageState missing");
 
     let stems_available = global.stems_available.read_only();
+    let stems_loading   = global.stems_loading.read_only();
     let stem_volumes    = viz_state.stem_volumes.read_only();
     let set_stem_volumes = viz_state.stem_volumes.write_only();
     let stem_gains      = global.stem_gains;
+    let master_volume   = global.volume.read_only();
 
     view! {
         <div class="flex flex-col gap-4 text-sm">
@@ -24,7 +26,11 @@ pub fn StemMixer() -> impl IntoView {
                 <div class="flex items-center justify-between mb-1">
                     <h3 class="text-xs font-semibold text-gray-400 uppercase tracking-wider">"Stem Mixer"</h3>
                     {move || {
-                        if !stems_available.get() {
+                        if stems_loading.get() {
+                            Some(view! {
+                                <span class="text-xs bg-orange-900/60 text-orange-300 px-2 py-0.5 rounded-full">"Stem Loading..."</span>
+                            })
+                        } else if !stems_available.get() {
                             Some(view! {
                                 <span class="text-xs bg-gray-700 text-gray-400 px-2 py-0.5 rounded-full">"Visual only"</span>
                             })
@@ -43,8 +49,9 @@ pub fn StemMixer() -> impl IntoView {
                             let mut vols = stem_volumes.get();
                             vols.vocals = v;
                             set_stem_volumes.set(vols);
+                            let master = master_volume.get_untracked();
                             if let Some(gains) = stem_gains.get_value() {
-                                gains.vocals.gain().set_value(v as f32);
+                                gains.vocals.gain().set_value((master * v) as f32);
                             }
                         }
                     }
@@ -58,8 +65,9 @@ pub fn StemMixer() -> impl IntoView {
                             let mut vols = stem_volumes.get();
                             vols.drums = v;
                             set_stem_volumes.set(vols);
+                            let master = master_volume.get_untracked();
                             if let Some(gains) = stem_gains.get_value() {
-                                gains.drums.gain().set_value(v as f32);
+                                gains.drums.gain().set_value((master * v) as f32);
                             }
                         }
                     }
@@ -73,8 +81,9 @@ pub fn StemMixer() -> impl IntoView {
                             let mut vols = stem_volumes.get();
                             vols.bass = v;
                             set_stem_volumes.set(vols);
+                            let master = master_volume.get_untracked();
                             if let Some(gains) = stem_gains.get_value() {
-                                gains.bass.gain().set_value(v as f32);
+                                gains.bass.gain().set_value((master * v) as f32);
                             }
                         }
                     }
@@ -88,8 +97,9 @@ pub fn StemMixer() -> impl IntoView {
                             let mut vols = stem_volumes.get();
                             vols.others = v;
                             set_stem_volumes.set(vols);
+                            let master = master_volume.get_untracked();
                             if let Some(gains) = stem_gains.get_value() {
-                                gains.others.gain().set_value(v as f32);
+                                gains.others.gain().set_value((master * v) as f32);
                             }
                         }
                     }

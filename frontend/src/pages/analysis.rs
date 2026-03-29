@@ -34,7 +34,7 @@ pub fn Analysis() -> impl IntoView {
     let track_data = create_resource(stem, |s: String| async move { api::fetch_track(&s).await });
 
     // 同じ stem がロード済みならスキップ、異なる場合のみフェッチ
-    let audio_buffer_res = create_local_resource(stem, {
+    let main_audio_res = create_local_resource(stem, {
         let global = global.clone();
         move |s: String| {
             let global = global.clone();
@@ -54,15 +54,11 @@ pub fn Analysis() -> impl IntoView {
     });
 
     // UI 表示用
-    let stems_loading = global.stems_loading;
-    let stems_error   = global.stems_error;
+    let stems_error = global.stems_error;
 
-    // ローディング状態（楽曲データ or ステム）
+    // ローディング状態（楽曲データのみ。ステムはノンブロッキング）
     let any_loading = move || {
-        track_data.loading().get() || audio_buffer_res.loading().get() || stems_loading.get()
-    };
-    let loading_message = move || {
-        if stems_loading.get() { "ステム読み込み中..." } else { "楽曲データ読み込み中..." }
+        track_data.loading().get() || main_audio_res.loading().get()
     };
 
     // 楽曲切り替えを stem() の変化から即座に検出して音量を UI に反映
@@ -73,7 +69,7 @@ pub fn Analysis() -> impl IntoView {
         let global = global.clone();
         let viz_page_state = viz_page_state.clone();
         move |_| {
-            if let Some(Ok(Some((ctx, buf)))) = audio_buffer_res.get() {
+            if let Some(Ok(Some((ctx, buf)))) = main_audio_res.get() {
                 let s = stem();
                 viz_page_state.reset_loop();
                 global.clear();
@@ -116,18 +112,7 @@ pub fn Analysis() -> impl IntoView {
                 <div class="absolute inset-0 bg-gray-950/80 flex items-center justify-center z-50 backdrop-blur-sm">
                     <div class="bg-gray-800 rounded-xl p-8 border border-gray-700 flex flex-col items-center gap-4">
                         <div class="w-10 h-10 border-4 border-orange-500 border-t-transparent rounded-full animate-spin" />
-                        <p class="text-gray-200 font-medium">{loading_message()}</p>
-                    </div>
-                </div>
-            })}
-            // ステムロードエラーバナー（非ブロッキング）
-            {move || stems_error.get().map(|e| view! {
-                <div class="absolute inset-x-0 top-0 z-40 mx-auto max-w-lg mt-4 px-4">
-                    <div class="bg-red-900/80 border border-red-700 rounded-xl p-4 flex items-start gap-3">
-                        <p class="text-red-300 text-sm flex-1">
-                            <span class="font-medium text-red-200">"Stem load failed: "</span>
-                            {e}
-                        </p>
+                        <p class="text-gray-200 font-medium">"楽曲データ読み込み中..."</p>
                     </div>
                 </div>
             })}

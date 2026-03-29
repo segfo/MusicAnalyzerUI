@@ -296,26 +296,17 @@ pub fn Visualization() -> impl IntoView {
 
     let stems_loading = global.stems_loading;
     let stems_error   = global.stems_error;
-
+    // ローディング状態（楽曲データのみ。ステムはノンブロッキング）
+    let any_loading = move || {
+        track_data.loading().get() || main_audio_res.loading().get()
+    };
     view! {
         <div class="flex flex-col h-screen bg-gray-950 overflow-hidden relative">
-            // ステム読み込み中オーバーレイ（UIロック）
-            {move || stems_loading.get().then(|| view! {
+            {move || any_loading().then(|| view! {
                 <div class="absolute inset-0 bg-gray-950/80 flex items-center justify-center z-50 backdrop-blur-sm">
                     <div class="bg-gray-800 rounded-xl p-8 border border-gray-700 flex flex-col items-center gap-4">
                         <div class="w-10 h-10 border-4 border-orange-500 border-t-transparent rounded-full animate-spin" />
-                        <p class="text-gray-200 font-medium">"Loading stems..."</p>
-                    </div>
-                </div>
-            })}
-            // ステムロードエラー表示
-            {move || stems_error.get().map(|e| view! {
-                <div class="absolute inset-x-0 top-0 z-40 mx-auto max-w-lg mt-4 px-4">
-                    <div class="bg-red-900/80 border border-red-700 rounded-xl p-4 flex items-start gap-3">
-                        <p class="text-red-300 text-sm flex-1">
-                            <span class="font-medium text-red-200">"Stem load failed: "</span>
-                            {e}
-                        </p>
+                        <p class="text-gray-200 font-medium">"楽曲データ読み込み中..."</p>
                     </div>
                 </div>
             })}

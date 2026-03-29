@@ -64,15 +64,16 @@ pub fn Player(track: TrackDataset, active_page: &'static str) -> impl IntoView {
     let ctx = use_context::<PlaybackContext>().expect("PlaybackContext missing");
     let viz_state = use_context::<VisualizationPageState>().expect("VisualizationPageState missing");
     let params = leptos_router::use_params_map();
-    let stem = params.with(|p| p.get("stem").cloned().unwrap_or_default());
+    let stem = params.with_untracked(|p| p.get("stem").cloned().unwrap_or_default());
     let analysis_href    = format!("/analysis/{}", js_sys::encode_uri_component(&stem).as_string().unwrap_or_default());
     let visualize_href   = format!("/visualization/{}", js_sys::encode_uri_component(&stem).as_string().unwrap_or_default());
     let seekbar_ref = create_node_ref::<Div>();
 
-    let toggle_play = {
+    // 再生/一時停止の共通ロジック（ボタン・キーボード両方から呼ぶ）
+    let do_toggle = {
         let ctx = ctx.clone();
         let stem_eng = ctx.stem_engine;
-        move |_| {
+        move || {
             let ctx = ctx.clone();
             spawn_local(async move {
                 if ctx.is_playing.get() {
@@ -92,6 +93,31 @@ pub fn Player(track: TrackDataset, active_page: &'static str) -> impl IntoView {
             });
         }
     };
+
+    let toggle_play = { let f = do_toggle.clone(); move |_: web_sys::MouseEvent| f() };
+
+    // スペースキーで再生/一時停止トグル
+    {
+        let do_toggle_sv = store_value(do_toggle.clone());
+        use wasm_bindgen::closure::Closure;
+        let cb = Closure::<dyn Fn(web_sys::KeyboardEvent)>::new(move |ev: web_sys::KeyboardEvent| {
+            // 入力フィールドにフォーカスがある場合はスキップ
+            if let Some(target) = ev.target() {
+                if let Ok(el) = target.dyn_into::<web_sys::HtmlElement>() {
+                    let tag = el.tag_name().to_lowercase();
+                    if tag == "input" || tag == "textarea" { return; }
+                }
+            }
+            if ev.code() == "Space" {
+                ev.prevent_default();
+                do_toggle_sv.with_value(|f| f());
+            }
+        });
+        let _ = web_sys::window()
+            .unwrap()
+            .add_event_listener_with_callback("keydown", cb.as_ref().unchecked_ref());
+        cb.forget();
+    }
 
     let seek = {
         let ctx = ctx.clone();
