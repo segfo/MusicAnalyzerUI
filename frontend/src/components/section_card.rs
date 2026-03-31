@@ -4,6 +4,8 @@ use crate::types::{format_time, segment_color, SegmentResult, TrackDataset};
 use leptos::*;
 use leptos::leptos_dom::helpers::{set_timeout_with_handle, TimeoutHandle};
 use std::time::Duration;
+use wasm_bindgen::closure::Closure;
+use wasm_bindgen::JsCast;
 
 /// viewport 上の list_id 要素 top と card_id 要素 top の差を返す
 fn measure_delta_y(list_id: &str, card_id: &str) -> f64 {
@@ -17,6 +19,26 @@ fn measure_delta_y(list_id: &str, card_id: &str) -> f64 {
         return 0.0;
     };
     list_el.get_bounding_client_rect().top() - card_el.get_bounding_client_rect().top()
+}
+
+fn measure_viewport_x(seg_id: &str) -> (f64, f64) {
+    let Some(doc) = web_sys::window().and_then(|w| w.document()) else {
+        return (24.0, 280.0);
+    };
+    let Some(seg_el) = doc.get_element_by_id(seg_id) else {
+        return (24.0, 280.0);
+    };
+
+    let rect = seg_el.get_bounding_client_rect();
+
+    let left = rect.left();
+    let right = web_sys::window()
+        .and_then(|w| w.inner_width().ok())
+        .and_then(|w| w.as_f64())
+        .map(|vw| vw - rect.right())
+        .unwrap_or(280.0);
+
+    (left, right)
 }
 
 #[component]
@@ -47,10 +69,22 @@ pub fn SectionCard(track: TrackDataset) -> impl IntoView {
     // トグル OFF による Leave が進行中かどうか（高速 ON/OFF 対策）
     let toggle_leave_pending: StoredValue<bool> = store_value(false);
 
+    // セクションリストとの水平位置合わせ用
+    let (pos_left, set_pos_left) = create_signal(24.0_f64);
+    let (pos_right, set_pos_right) = create_signal(280.0_f64);
+
+    // ResizeObserver ハンドル（アンマウント時に disconnect するため保持）
+    let resize_observer: StoredValue<Option<web_sys::ResizeObserver>> = store_value(None);
+    // クロージャを生存させるためのハンドル（drop すると JS 関数ポインタが無効になる）
+    let resize_closure: StoredValue<Option<Closure<dyn Fn(js_sys::Array)>>> = store_value(None);
+
     on_cleanup(move || {
         if let Some(h) = timeout_handle.get_value() {
             h.clear();
         }
+        resize_observer.with_value(|obs| {
+            if let Some(obs) = obs { obs.disconnect(); }
+        });
     });
 
     // 現在時刻を監視してセクション終了 0.5s 前にフェードアウトを開始
@@ -141,10 +175,12 @@ pub fn SectionCard(track: TrackDataset) -> impl IntoView {
                 // getBoundingClientRect() はこの transform を含むため、
                 // 正しい from_y を得るには to_y 分を補正する必要がある。
                 let stored_to_y = pre_leave_to_y.get_value();
-                let raw_from_y = seg_struct_index(new_idx).map_or(0.0, |id| {
-                    measure_delta_y(&format!("seg-item-{}", id), "section-card-root")
-                });
+                let new_seg_id = seg_struct_index(new_idx).unwrap_or(0);
+                let raw_from_y = measure_delta_y(&format!("seg-item-{}", new_seg_id), "section-card-root");
                 let from_y = raw_from_y + stored_to_y;
+                let (l, r) = measure_viewport_x(&format!("seg-item-{}", new_seg_id));
+                set_pos_left.set(l);
+                set_pos_right.set(r);
                 set_displayed_idx.set(new_idx);
                 set_card_showing.set(true);
                 set_anim_style.set(format!(
@@ -155,14 +191,16 @@ pub fn SectionCard(track: TrackDataset) -> impl IntoView {
                 let to_y = seg_struct_index(old_idx).map_or(0.0, |id| {
                     measure_delta_y(&format!("seg-item-{}", id), "section-card-root")
                 });
-                let from_y = seg_struct_index(new_idx).map_or(0.0, |id| {
-                    measure_delta_y(&format!("seg-item-{}", id), "section-card-root")
-                });
+                let new_seg_id = seg_struct_index(new_idx).unwrap_or(0);
+                let from_y = measure_delta_y(&format!("seg-item-{}", new_seg_id), "section-card-root");
                 set_anim_style.set(format!(
                     "--to-y:{to_y}px;animation:cardLeave 0.3s ease-in both"
                 ));
                 timeout_handle.set_value(set_timeout_with_handle(move || {
                     if anim_gen.get_untracked() == gen {
+                        let (l, r) = measure_viewport_x(&format!("seg-item-{}", new_seg_id));
+                        set_pos_left.set(l);
+                        set_pos_right.set(r);
                         set_displayed_idx.set(new_idx); // Leave 完了後に新セグメント情報に切替
                         set_card_showing.set(true);
                         set_anim_style.set(format!(
@@ -195,12 +233,14 @@ pub fn SectionCard(track: TrackDataset) -> impl IntoView {
             }
         } else if !old_valid && new_valid {
             // 初回表示
+            let new_seg_id = seg_struct_index(new_idx).unwrap_or(0);
             set_displayed_idx.set(new_idx);
             set_card_open.set(true);
             if should_show {
-                let from_y = seg_struct_index(new_idx).map_or(0.0, |id| {
-                    measure_delta_y(&format!("seg-item-{}", id), "section-card-root")
-                });
+                let from_y = measure_delta_y(&format!("seg-item-{}", new_seg_id), "section-card-root");
+                let (l, r) = measure_viewport_x(&format!("seg-item-{}", new_seg_id));
+                set_pos_left.set(l);
+                set_pos_right.set(r);
                 set_card_showing.set(true);
                 set_anim_style.set(format!(
                     "--from-y:{from_y}px;animation:cardEnter 0.35s ease-out both;pointer-events:auto"
@@ -242,6 +282,9 @@ pub fn SectionCard(track: TrackDataset) -> impl IntoView {
                         &format!("seg-item-{}", seg.index),
                         "section-card-root",
                     );
+                    let (l, r) = measure_viewport_x(&format!("seg-item-{}", seg.index));
+                    set_pos_left.set(l);
+                    set_pos_right.set(r);
                     set_displayed_idx.set(idx);
                     set_card_showing.set(true);
                     set_anim_style.set(format!(
@@ -263,6 +306,9 @@ pub fn SectionCard(track: TrackDataset) -> impl IntoView {
                         &format!("seg-item-{}", seg.index),
                         "section-card-root",
                     );
+                    let (l, r) = measure_viewport_x(&format!("seg-item-{}", seg.index));
+                    set_pos_left.set(l);
+                    set_pos_right.set(r);
                     set_displayed_idx.set(idx);
                     set_anim_style.set(format!(
                         "--from-y:{from_y}px;animation:cardEnter 0.35s ease-out both;pointer-events:auto"
@@ -309,6 +355,35 @@ pub fn SectionCard(track: TrackDataset) -> impl IntoView {
         }
     });
 
+    // section-card-container のリサイズを監視して pos_left/pos_right を再計測
+    create_effect(move |prev| {
+        if prev.is_some() { return; }  // 初回レンダリング後に一度だけ実行
+
+        let closure = Closure::<dyn Fn(js_sys::Array)>::new(move |_: js_sys::Array| {
+            // カード非表示中は再計測不要
+            if !card_showing.get_untracked() { return; }
+            let segs = segments.get_value();
+            let idx = prev_idx.get_untracked();
+            if let Some(i) = idx {
+                if let Some(seg) = segs.get(i) {
+                    let (l, r) = measure_viewport_x(&format!("seg-item-{}", seg.index));
+                    set_pos_left.set(l);
+                    set_pos_right.set(r);
+                }
+            }
+        });
+
+        let Some(doc) = web_sys::window().and_then(|w| w.document()) else { return; };
+        let Some(el) = doc.get_element_by_id("section-card-container") else { return; };
+
+        let obs = web_sys::ResizeObserver::new(closure.as_ref().unchecked_ref())
+            .expect("ResizeObserver::new failed");
+        obs.observe(&el);
+
+        resize_observer.set_value(Some(obs));
+        resize_closure.set_value(Some(closure));
+    });
+
     // Derive each field separately to avoid FnOnce in view!
     // displayed_idx を使うことで、Leave 中は旧セグメント情報を保持し、Enter 時に新セグメントへ切替
     let current_seg: Memo<Option<SegmentResult>> = create_memo(move |_| {
@@ -324,7 +399,7 @@ pub fn SectionCard(track: TrackDataset) -> impl IntoView {
     let seg_end = create_memo(move |_| current_seg.get().map(|s| s.end).unwrap_or(0.0));
     let beat_count = create_memo(move |_| current_seg.get().map(|s| s.beat_count).unwrap_or(0));
     let caption = create_memo(move |_| current_seg.get().and_then(|s| s.caption.clone()));
-    let sub_caps = create_memo(move |_| {
+    let _sub_caps = create_memo(move |_| {
         current_seg
             .get()
             .map(|s| s.sub_captions.clone())
@@ -334,8 +409,11 @@ pub fn SectionCard(track: TrackDataset) -> impl IntoView {
     view! {
         <div
             id="section-card-root"
-            class="absolute bottom-[40%] left-6 right-[280px] max-w-4xl mx-auto max-h-96 overflow-y-auto bg-gray-800 rounded-xl p-4 shadow-2xl border border-gray-600 z-20"
-            style=move || anim_style.get()
+            class="absolute bottom-[40%] max-h-96 overflow-y-auto bg-gray-800 rounded-xl p-4 shadow-2xl border border-gray-600 z-20"
+            style=move || format!(
+                "left:{}px;right:{}px;{}",
+                pos_left.get(), pos_right.get(), anim_style.get()
+            )
         >
             <Show when=move || {
                 let seg = current_seg.get();

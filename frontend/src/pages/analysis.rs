@@ -133,7 +133,7 @@ pub fn Analysis() -> impl IntoView {
                                 <Timeline track=track_for_timeline />
 
                                 // Main content + sidebar
-                                <div class="relative flex flex-1 min-h-0 overflow-hidden">
+                                <div id="section-card-container" class="relative flex flex-1 min-h-0 overflow-hidden">
                                     <div class="flex-1 overflow-y-auto p-6">
                                         <AnalysisContent track=track viz_href=viz_href />
                                     </div>

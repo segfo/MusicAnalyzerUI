@@ -44,6 +44,8 @@ features = [
   "CanvasGradient",
   "CanvasRenderingContext2d",
   "GainNode",
+  "ResizeObserver",
+  "ResizeObserverEntry",
 ]
 
 [profile.release]
