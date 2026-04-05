@@ -7,9 +7,9 @@ use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use web_sys::{CanvasRenderingContext2d, HtmlCanvasElement};
 
-use crate::audio::StemVolumes;
+use crate::audio::{StemAudioEngine, StemVolumes};
 use crate::pages::visualization::VizContext;
-use crate::state::VisualizationPageState;
+use crate::state::{GlobalPlayback, VisualizationPageState};
 
 // ---------------------------------------------------------------------------
 // Internal animation state (lives inside the rAF closure)
@@ -41,6 +41,13 @@ struct AnimState {
     chord_label: String,
     // pseudo-random state (simple LCG)
     rng: u64,
+    // --- ピッチ偏差 / キーアンティシペーション ---
+    vocal_pitch_dev: f64,   // ±20° 以内の色相偏差
+    next_key_hue: f64,      // 次コードのキー色相（アンティシペーション用）
+    chord_completion: f64,  // 現コード内進行度 0.0〜1.0
+    vocals_available: bool, // ボーカルステム有無
+    chord_unknown: bool,    // 現コードが N（未検出）かどうか
+    n_elapsed: f64,         // N 区間の連続経過秒数（chord_unknown = false でリセット）
 }
 
 impl AnimState {
@@ -58,6 +65,12 @@ impl AnimState {
             particles: Vec::with_capacity(200),
             chord_label: String::new(),
             rng: 12345,
+            vocal_pitch_dev: 0.0,
+            next_key_hue: 220.0,
+            chord_completion: 0.0,
+            vocals_available: false,
+            chord_unknown: false,
+            n_elapsed: 0.0,
         }
     }
 
@@ -80,15 +93,18 @@ pub fn VizCanvas() -> impl IntoView {
     let canvas_ref = create_node_ref::<Canvas>();
     let viz = use_context::<VizContext>().expect("VizContext missing");
     let viz_state = use_context::<VisualizationPageState>().expect("VisualizationPageState missing");
+    let global = use_context::<GlobalPlayback>().expect("GlobalPlayback missing");
 
     // Start the rAF loop once the canvas is mounted; cancel it on unmount
     create_effect({
         let viz = viz.clone();
         let stem_volumes = viz_state.stem_volumes.read_only();
+        let stem_engine_sv = global.stem_engine;
+        let is_playing = global.is_playing;
         move |_| {
             let Some(canvas_el) = canvas_ref.get() else { return };
             let canvas = canvas_el.unchecked_ref::<HtmlCanvasElement>().clone();
-            let (alive, raf_id) = start_animation_loop(canvas, viz.clone(), stem_volumes);
+            let (alive, raf_id) = start_animation_loop(canvas, viz.clone(), stem_volumes, stem_engine_sv, is_playing, global.current_time, global.duration);
             on_cleanup(move || {
                 alive.set(false);
                 if let Some(win) = web_sys::window() {
@@ -123,7 +139,15 @@ pub fn VizCanvas() -> impl IntoView {
 // rAF loop setup
 // ---------------------------------------------------------------------------
 
-fn start_animation_loop(canvas: HtmlCanvasElement, viz: VizContext, stem_volumes: ReadSignal<StemVolumes>) -> (Rc<Cell<bool>>, Rc<Cell<i32>>) {
+fn start_animation_loop(
+    canvas: HtmlCanvasElement,
+    viz: VizContext,
+    stem_volumes: ReadSignal<StemVolumes>,
+    stem_engine_sv: StoredValue<Option<StemAudioEngine>>,
+    is_playing: RwSignal<bool>,
+    current_time: RwSignal<f64>,
+    duration: RwSignal<f64>,
+) -> (Rc<Cell<bool>>, Rc<Cell<i32>>) {
     let state = Rc::new(RefCell::new(AnimState::new()));
 
     // alive flag: set to false by on_cleanup to stop the loop
@@ -164,9 +188,10 @@ fn start_animation_loop(canvas: HtmlCanvasElement, viz: VizContext, stem_volumes
         });
     }
     {
+        // estimated_key_hue → target_hue（chord_hue フォールバック含む）
         let state_c = state.clone();
         create_effect(move |_| {
-            let hue = viz.current_hue.get();
+            let hue = viz.estimated_key_hue.get();
             state_c.borrow_mut().target_hue = hue;
         });
     }
@@ -185,6 +210,52 @@ fn start_animation_loop(canvas: HtmlCanvasElement, viz: VizContext, stem_volumes
         create_effect(move |_| {
             let label = viz.current_chord.get();
             state_ch.borrow_mut().chord_label = label;
+        });
+    }
+    {
+        let state_n = state.clone();
+        create_effect(move |_| {
+            let h = viz.next_key_hue.get();
+            state_n.borrow_mut().next_key_hue = h;
+        });
+    }
+    {
+        let state_cc = state.clone();
+        create_effect(move |_| {
+            let c = viz.chord_completion.get();
+            state_cc.borrow_mut().chord_completion = c;
+        });
+    }
+    {
+        let state_va = state.clone();
+        create_effect(move |_| {
+            let v = viz.vocals_available.get();
+            state_va.borrow_mut().vocals_available = v;
+        });
+    }
+    {
+        let state_cu = state.clone();
+        create_effect(move |_| {
+            let v = viz.chord_unknown.get();
+            state_cu.borrow_mut().chord_unknown = v;
+        });
+    }
+    {
+        let state_ip = state.clone();
+        create_effect(move |_| {
+            if !is_playing.get() {
+                let t = current_time.get_untracked();
+                let dur = duration.get_untracked();
+                // 先頭（0:00）または末尾（曲終了）のときのみ色を初期状態にリセット
+                let at_start = t < 0.5;
+                let at_end = dur > 0.0 && dur - t < 1.0;
+                if at_start || at_end {
+                    let mut s = state_ip.borrow_mut();
+                    s.target_hue = 220.0;
+                    s.vocal_pitch_dev = 0.0;
+                    s.n_elapsed = 0.0;
+                }
+            }
         });
     }
 
@@ -206,6 +277,52 @@ fn start_animation_loop(canvas: HtmlCanvasElement, viz: VizContext, stem_volumes
         if w > 0 && h > 0 && (canvas.width() != w || canvas.height() != h) {
             canvas.set_width(w);
             canvas.set_height(h);
+        }
+
+        // N 経過時間を更新（再生中かつ N 区間のみ加算、それ以外はリセット）
+        {
+            let mut s = state.borrow_mut();
+            if s.chord_unknown && is_playing.get_untracked() {
+                s.n_elapsed += 1.0 / 60.0;
+            } else {
+                s.n_elapsed = 0.0;
+            }
+        }
+
+        // ピッチ偏差 / コードアンティシペーション / ドリフト計算（N 区間のみ適用）
+        {
+            let (chord_unknown, vocals_available, next_hue, target, completion, n_elapsed) = {
+                let s = state.borrow();
+                (s.chord_unknown, s.vocals_available, s.next_key_hue, s.target_hue,
+                 s.chord_completion, s.n_elapsed)
+            };
+            let dev = if !chord_unknown {
+                // コード検出済み → 偏差なし
+                0.0
+            } else {
+                // N 区間: 0.5s 後から立ち上がるアニメドリフト
+                let drift = n_section_drift(n_elapsed);
+
+                if vocals_available {
+                    // ボーカルあり: リアルタイムピッチ + drift
+                    let pitch = stem_engine_sv.with_value(|se| {
+                        let se = se.as_ref()?;
+                        let data = se.get_vocal_time_domain_data()?;
+                        let sr = se.sample_rate();
+                        Some(autocorrelation_pitch(&data, sr).map(hz_to_hue_deviation).unwrap_or(0.0))
+                    }).unwrap_or(0.0);
+                    pitch + drift
+                } else {
+                    // ボーカルなし: アンティシペーション（0.5s 未満）→ drift（0.5s 以上）
+                    let ramp = ((n_elapsed - 0.5) * 2.0).clamp(0.0, 1.0);
+                    let anticipation = {
+                        let diff = hue_diff_wrapped(next_hue, target);
+                        diff * completion.min(0.8) * 0.30 * (1.0 - ramp)
+                    };
+                    anticipation + drift
+                }
+            };
+            state.borrow_mut().vocal_pitch_dev = dev;
         }
 
         if let Ok(ctx) = canvas
@@ -253,7 +370,10 @@ fn render_frame(
     let base_r = h.min(w) * 0.18;
 
     // --- Lerp state ---
-    lerp_to(&mut state.hue, state.target_hue, 0.04);
+    // ピッチ偏差を加味した色相ブレンド（0/360° 境界を短経路で補間）
+    let blended_hue = (state.target_hue + state.vocal_pitch_dev * 0.35).rem_euclid(360.0);
+    let hue_delta = hue_diff_wrapped(blended_hue, state.hue);
+    state.hue = (state.hue + hue_delta * 0.04).rem_euclid(360.0);
     lerp_to(&mut state.energy, state.target_energy, 0.03);
     lerp_to(&mut state.density, state.target_density, 0.03);
 
@@ -424,4 +544,63 @@ fn draw_particles(ctx: &CanvasRenderingContext2d, state: &mut AnimState, w: f64,
 #[inline]
 fn lerp_to(current: &mut f64, target: f64, t: f64) {
     *current += (target - *current) * t;
+}
+
+/// N 区間で 0.5s 後から立ち上がるアニメーション色相ドリフト。
+/// 2つの周波数を重ねることで機械的でない揺らぎを作る。
+fn n_section_drift(n_elapsed: f64) -> f64 {
+    if n_elapsed < 0.5 {
+        return 0.0;
+    }
+    // 0.5s〜1.0s で 0 → 25.0 にランプアップ
+    let ramp = ((n_elapsed - 0.5) * 2.0).min(25.0);
+    let osc = f64::sin(n_elapsed * 0.9) * 0.55 + f64::sin(n_elapsed * 2.1) * 0.45;
+    osc * 25.0 * ramp
+}
+
+/// 色相の符号付き最短経路差分（±180° 以内に正規化）
+#[inline]
+fn hue_diff_wrapped(target: f64, current: f64) -> f64 {
+    let d = (target - current).rem_euclid(360.0);
+    if d > 180.0 { d - 360.0 } else { d }
+}
+
+/// 時間領域サンプルから自己相関法で基本周波数（Hz）を推定する。
+/// 無音（RMS < 0.01）や推定失敗時は None を返す。
+fn autocorrelation_pitch(samples: &[f32], sample_rate: f32) -> Option<f32> {
+    let n = samples.len();
+    let rms: f32 = (samples.iter().map(|&s| s * s).sum::<f32>() / n as f32).sqrt();
+    if rms < 0.01 {
+        return None;
+    }
+
+    // ボーカル音域: 80 Hz〜1200 Hz
+    let tau_min = (sample_rate / 1200.0) as usize;
+    let tau_max = ((sample_rate / 80.0) as usize).min(n / 2);
+    if tau_min >= tau_max {
+        return None;
+    }
+
+    let (best_tau, best_val) = (tau_min..tau_max)
+        .map(|tau| {
+            let corr: f32 = samples[..n - tau]
+                .iter()
+                .zip(&samples[tau..])
+                .map(|(&a, &b)| a * b)
+                .sum();
+            (tau, corr)
+        })
+        .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))?;
+
+    if best_val <= 0.0 {
+        return None;
+    }
+    Some(sample_rate / best_tau as f32)
+}
+
+/// Hz → 音高に基づく色相偏差（±20°）
+fn hz_to_hue_deviation(hz: f32) -> f64 {
+    let semitone = 12.0 * (hz / 440.0_f32).log2();
+    let t = (semitone.rem_euclid(12.0) / 12.0) as f64; // 0.0〜1.0
+    (t * 2.0 * std::f64::consts::PI).sin() * 20.0
 }

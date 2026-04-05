@@ -8,8 +8,9 @@ use crate::{
         timeline::Timeline,
         viz_canvas::VizCanvas,
     },
+    key_estimation,
     state::{GlobalPlayback, VisualizationPageState},
-    types::chord_hue,
+    types::{chord_hue, format_chord_display},
 };
 use leptos::*;
 use leptos_router::*;
@@ -50,6 +51,7 @@ async fn load_stems_inner(global: &crate::state::GlobalPlayback, stem_key: &str)
     };
     // ステム切り替えで古いタスクを中断（エラーとして扱わない）
     if global.loading_stem_key.get_value() != stem_key { return Ok(()); }
+    global.vocals_stem_available.set(avail.vocals);
 
     let stem_ctx = AudioContext::new().map_err(|e| format!("AudioContext error: {e:?}"))?;
 
@@ -122,6 +124,24 @@ pub struct VizContext {
     pub set_beat_trigger: WriteSignal<u32>,
     pub downbeat_trigger: ReadSignal<u32>,
     pub set_downbeat_trigger: WriteSignal<u32>,
+    // --- キー推定 / ピッチ偏差 ---
+    /// 事前計算したキー推定タイムライン（時刻→色相）
+    pub key_hue_timeline: StoredValue<Vec<(f64, f64)>>,
+    /// 現在のキー推定色相（タイムラインから、なければ chord_hue にフォールバック）
+    pub estimated_key_hue: ReadSignal<f64>,
+    pub set_estimated_key_hue: WriteSignal<f64>,
+    /// 次コードのキー推定色相（アンティシペーション用）
+    pub next_key_hue: ReadSignal<f64>,
+    pub set_next_key_hue: WriteSignal<f64>,
+    /// 現コード内の進行度 0.0〜1.0
+    pub chord_completion: ReadSignal<f64>,
+    pub set_chord_completion: WriteSignal<f64>,
+    /// ボーカルステムが利用可能か
+    pub vocals_available: ReadSignal<bool>,
+    pub set_vocals_available: WriteSignal<bool>,
+    /// 現在のコードが N（未検出）かどうか
+    pub chord_unknown: ReadSignal<bool>,
+    pub set_chord_unknown: WriteSignal<bool>,
 }
 
 impl VizContext {
@@ -135,12 +155,23 @@ impl VizContext {
         let (current_chord,   set_current_chord)   = create_signal(String::new());
         let (beat_trigger,    set_beat_trigger)    = create_signal(0u32);
         let (downbeat_trigger, set_downbeat_trigger) = create_signal(0u32);
+        let (estimated_key_hue, set_estimated_key_hue) = create_signal(220.0_f64);
+        let (next_key_hue,     set_next_key_hue)   = create_signal(220.0_f64);
+        let (chord_completion, set_chord_completion) = create_signal(0.0_f64);
+        let (vocals_available, set_vocals_available) = create_signal(false);
+        let (chord_unknown,    set_chord_unknown)   = create_signal(false);
         Self {
             energy, set_energy, density, set_density,
             current_hue, set_current_hue,
             current_chord, set_current_chord,
             beat_trigger, set_beat_trigger,
             downbeat_trigger, set_downbeat_trigger,
+            key_hue_timeline: store_value(Vec::new()),
+            estimated_key_hue, set_estimated_key_hue,
+            next_key_hue, set_next_key_hue,
+            chord_completion, set_chord_completion,
+            vocals_available, set_vocals_available,
+            chord_unknown, set_chord_unknown,
         }
     }
 }
@@ -203,6 +234,11 @@ pub fn Visualization() -> impl IntoView {
         viz_ctx.set_energy, viz_ctx.set_density, viz_ctx.set_current_hue,
         viz_ctx.set_current_chord, viz_ctx.set_beat_trigger, viz_ctx.set_downbeat_trigger,
     );
+    let (set_estimated_key_hue, set_next_key_hue, set_chord_completion, set_vocals_available, set_chord_unknown) = (
+        viz_ctx.set_estimated_key_hue, viz_ctx.set_next_key_hue,
+        viz_ctx.set_chord_completion, viz_ctx.set_vocals_available, viz_ctx.set_chord_unknown,
+    );
+    let key_hue_timeline = viz_ctx.key_hue_timeline;
 
     // --- Beat/section/chord 変化追跡用（tick 間の状態保持）---
     let prev_beat_idx:      StoredValue<usize>  = store_value(0);
@@ -240,6 +276,21 @@ pub fn Visualization() -> impl IntoView {
     // stems が利用可能になったらメイン AudioEngine をミュート・停止し StemAudioEngine に引き継ぐ
     setup_stem_handoff_effect(global.clone(), viz_page_state.clone());
 
+    // --- トラック読み込み時にキー推定タイムラインを事前計算 ---
+    create_effect(move |_| {
+        let Some(Ok(track)) = track_data.get() else { return };
+        let timeline = key_estimation::estimate_key_timeline(&track.chords);
+        key_hue_timeline.set_value(timeline);
+    });
+
+    // --- ボーカルステム有無を VizContext に同期 ---
+    {
+        let global_va = global.vocals_stem_available;
+        create_effect(move |_| {
+            set_vocals_available.set(global_va.get());
+        });
+    }
+
     // --- current_segment_idx ---
     let ct = global.current_time;
     let current_segment_idx = create_memo(move |_| {
@@ -253,7 +304,10 @@ pub fn Visualization() -> impl IntoView {
     provide_context(viz_ctx);
 
     // --- Visualization 固有のポーリング: ビート / セクション / コード検出 ---
+    let is_playing_read = global.is_playing.read_only();
     use_playback_polling(global.clone(), viz_page_state.clone(), move |t| {
+        // 停止中はコード/キー推定の更新を止める（色のリセットを上書きしないため）
+        if !is_playing_read.get_untracked() { return; }
         let Some(Ok(track)) = track_data.get() else { return };
 
         // Beat detection (apply offset: positive offset fires triggers earlier)
@@ -281,15 +335,45 @@ pub fn Visualization() -> impl IntoView {
             }
         }
 
-        // Chord change → hue
-        if let Some(chord) = track.chords.iter().find(|c| {
+        // Chord change → hue / key estimation（N 判定ベース）
+        if let Some((chord_idx, chord)) = track.chords.iter().enumerate().find(|(_, c)| {
             c.start.map(|s| t >= s).unwrap_or(false) && c.end.map(|e| t < e).unwrap_or(false)
         }) {
             let label = chord.label.as_deref().unwrap_or("N").to_string();
+            let start = chord.start.unwrap_or(t);
+            let end   = chord.end.unwrap_or(t + 1.0);
+
             if label != prev_chord_label.get_value() {
                 prev_chord_label.set_value(label.clone());
                 set_current_hue.set(chord_hue(&label));
-                set_current_chord.set(if label == "N" { String::new() } else { label });
+                set_current_chord.set(format_chord_display(&label));
+            }
+
+            if label == "N" {
+                // N 区間: タイムラインでキーを補完、ピッチ偏差・アンティシペーション有効
+                set_chord_unknown.set(true);
+                let completion = ((t - start) / (end - start)).clamp(0.0, 1.0);
+                set_chord_completion.set(completion);
+
+                let (estimated, next_hue) = key_hue_timeline.with_value(|tl| {
+                    let cur = key_estimation::lookup_key_hue(tl, t);
+                    // 次の非 N コードのキー色をアンティシペーション先に使う
+                    let next = track.chords[chord_idx..]
+                        .iter()
+                        .find(|c| c.label.as_deref().unwrap_or("N") != "N")
+                        .and_then(|c| c.start)
+                        .map(|s| key_estimation::lookup_key_hue(tl, s))
+                        .unwrap_or(cur);
+                    (cur, next)
+                });
+                set_estimated_key_hue.set(estimated);
+                set_next_key_hue.set(next_hue);
+            } else {
+                // 非 N 区間: 検出済みコードの色をそのまま使用、偏差なし
+                set_chord_unknown.set(false);
+                set_chord_completion.set(0.0);
+                set_estimated_key_hue.set(chord_hue(&label));
+                set_next_key_hue.set(chord_hue(&label));
             }
         }
     });

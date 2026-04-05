@@ -134,6 +134,45 @@ pub fn chord_hue(label: &str) -> f64 {
     }
 }
 
+/// Harte 記法のコードラベルを表示用文字列に変換する。
+/// - マイナーコード → "Cm", "F#m" のように小文字 m を付与
+/// - メジャーコード → "C", "F#" のようにルート音のみ
+/// - "N" / 空文字 → 空文字列
+pub fn format_chord_display(label: &str) -> String {
+    let s = label.trim();
+    if s == "N" || s == "N/A" || s.is_empty() {
+        return String::new();
+    }
+
+    let bytes = s.as_bytes();
+    let mut i = 0;
+
+    // ルート音（A〜G）
+    if i >= bytes.len() || !matches!(bytes[i], b'A'..=b'G') {
+        return String::new();
+    }
+    i += 1;
+
+    // 臨時記号（# または b）
+    if i < bytes.len() && (bytes[i] == b'#' || bytes[i] == b'b') {
+        i += 1;
+    }
+
+    let root = &s[..i];
+    let quality = &s[i..];
+
+    // マイナー判定: "m"/"min" 接頭辞（"maj" は除外）、":min"、":m"
+    let is_minor = (quality.starts_with('m') && !quality.starts_with("maj"))
+        || quality.starts_with(":min")
+        || quality == ":m";
+
+    if is_minor {
+        format!("{}m", root)
+    } else {
+        root.to_string()
+    }
+}
+
 /// Format seconds as m:ss
 pub fn format_time(secs: f64) -> String {
     if secs.is_nan() || secs.is_infinite() {

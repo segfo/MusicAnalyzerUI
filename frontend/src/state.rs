@@ -25,6 +25,7 @@ pub struct GlobalPlayback {
     pub stem_engine:   StoredValue<Option<StemAudioEngine>>,
     pub stem_gains:    StoredValue<Option<StemGains>>,
     pub stems_available: RwSignal<bool>,
+    pub vocals_stem_available: RwSignal<bool>,
     pub stems_loading:   RwSignal<bool>,
     /// ステムロード失敗時のエラーメッセージ（None = エラーなし）
     pub stems_error:     RwSignal<Option<String>>,
@@ -43,8 +44,9 @@ impl GlobalPlayback {
             engine:           store_value(None),
             stem_engine:      store_value(None),
             stem_gains:       store_value(None),
-            stems_available:  create_rw_signal(false),
-            stems_loading:    create_rw_signal(false),
+            stems_available:        create_rw_signal(false),
+            vocals_stem_available:  create_rw_signal(false),
+            stems_loading:          create_rw_signal(false),
             stems_error:      create_rw_signal(None),
             loading_stem_key: store_value(String::new()),
         }
@@ -73,6 +75,7 @@ impl GlobalPlayback {
         self.loaded_stem.set(String::new());
         self.duration.set(0.0);
         self.stems_available.set(false);
+        self.vocals_stem_available.set(false);
         self.stems_loading.set(false);
         self.stems_error.set(None);
     }

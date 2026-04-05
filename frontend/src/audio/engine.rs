@@ -1,7 +1,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 use wasm_bindgen_futures::JsFuture;
-use web_sys::{AudioBuffer, AudioBufferSourceNode, AudioContext, AudioScheduledSourceNode, GainNode};
+use web_sys::{AnalyserNode, AudioBuffer, AudioBufferSourceNode, AudioContext, AudioScheduledSourceNode, GainNode};
 
 // ---------------------------------------------------------------------------
 // StemVolumes — per-stem visual/audio intensity (0.0–1.0)
@@ -170,6 +170,7 @@ pub struct StemAudioEngine {
     buffers: Rc<[Option<AudioBuffer>; 4]>,
     gains: [GainNode; 4],
     state: Rc<RefCell<StemEngineState>>,
+    analyser: Option<AnalyserNode>,
 }
 
 struct StemEngineState {
@@ -183,6 +184,12 @@ struct StemEngineState {
 impl StemAudioEngine {
     pub fn new(ctx: AudioContext, buffers: [Option<AudioBuffer>; 4], gains: [GainNode; 4]) -> Self {
         let duration = buffers.iter().flatten().map(|b| b.duration()).fold(0.0_f64, f64::max);
+        // AnalyserNode を vocals GainNode (index 0) の出力側にタップとして接続
+        let analyser = ctx.create_analyser().ok().map(|a| {
+            a.set_fft_size(2048);
+            let _ = gains[0].connect_with_audio_node(&a);
+            a
+        });
         Self {
             ctx,
             buffers: Rc::new(buffers),
@@ -194,7 +201,22 @@ impl StemAudioEngine {
                 playing: false,
                 duration,
             })),
+            analyser,
         }
+    }
+
+    /// ボーカルステムの時間領域データを取得する（ピッチ検出用）。
+    /// AnalyserNode が存在しない場合は None を返す。
+    pub fn get_vocal_time_domain_data(&self) -> Option<Vec<f32>> {
+        let analyser = self.analyser.as_ref()?;
+        let len = analyser.fft_size() as usize;
+        let mut buf = vec![0.0f32; len];
+        analyser.get_float_time_domain_data(&mut buf);
+        Some(buf)
+    }
+
+    pub fn sample_rate(&self) -> f32 {
+        self.ctx.sample_rate()
     }
 
     pub fn duration(&self) -> f64 { self.state.borrow().duration }

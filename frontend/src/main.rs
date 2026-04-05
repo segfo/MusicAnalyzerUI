@@ -3,6 +3,7 @@ mod audio;
 mod audio_setup;
 mod components;
 mod config;
+mod key_estimation;
 mod pages;
 mod state;
 mod types;

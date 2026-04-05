@@ -43,6 +43,7 @@ features = [
   "AudioScheduledSourceNode",
   "CanvasGradient",
   "CanvasRenderingContext2d",
+  "AnalyserNode",
   "GainNode",
   "ResizeObserver",
   "ResizeObserverEntry",

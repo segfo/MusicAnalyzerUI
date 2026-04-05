@@ -113,10 +113,18 @@ pub fn Player(track: TrackDataset, active_page: &'static str) -> impl IntoView {
                 do_toggle_sv.with_value(|f| f());
             }
         });
-        let _ = web_sys::window()
-            .unwrap()
-            .add_event_listener_with_callback("keydown", cb.as_ref().unchecked_ref());
-        cb.forget();
+        let win = web_sys::window().unwrap();
+        let cb_ref = cb.as_ref().unchecked_ref::<js_sys::Function>().clone();
+        let _ = win.add_event_listener_with_callback("keydown", &cb_ref);
+        // Player アンマウント時にリスナーを除去する。
+        // cb.forget() を使うと window にリスナーが残り続け、Player が再マウントされて
+        // do_toggle_sv のスコープが破棄された後に発火すると WASM パニックになる。
+        on_cleanup(move || {
+            if let Some(w) = web_sys::window() {
+                let _ = w.remove_event_listener_with_callback("keydown", &cb_ref);
+            }
+            drop(cb);
+        });
     }
 
     let seek = {
