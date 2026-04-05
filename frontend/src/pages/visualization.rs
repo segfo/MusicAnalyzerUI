@@ -142,6 +142,15 @@ pub struct VizContext {
     /// 現在のコードが N（未検出）かどうか
     pub chord_unknown: ReadSignal<bool>,
     pub set_chord_unknown: WriteSignal<bool>,
+    /// 現在のセクションラベル（セクション変化時に更新）
+    pub current_section_label: ReadSignal<String>,
+    pub set_current_section_label: WriteSignal<String>,
+    /// 次のセクションラベル（末尾セクションなら空文字、毎 tick 更新）
+    pub next_section_label: ReadSignal<String>,
+    pub set_next_section_label: WriteSignal<String>,
+    /// 現セクション終了まで何秒か（毎 tick 更新）
+    pub secs_until_next_section: ReadSignal<f64>,
+    pub set_secs_until_next_section: WriteSignal<f64>,
 }
 
 impl VizContext {
@@ -160,6 +169,9 @@ impl VizContext {
         let (chord_completion, set_chord_completion) = create_signal(0.0_f64);
         let (vocals_available, set_vocals_available) = create_signal(false);
         let (chord_unknown,    set_chord_unknown)   = create_signal(false);
+        let (current_section_label, set_current_section_label) = create_signal(String::new());
+        let (next_section_label,    set_next_section_label)    = create_signal(String::new());
+        let (secs_until_next_section, set_secs_until_next_section) = create_signal(999.0_f64);
         Self {
             energy, set_energy, density, set_density,
             current_hue, set_current_hue,
@@ -172,6 +184,9 @@ impl VizContext {
             chord_completion, set_chord_completion,
             vocals_available, set_vocals_available,
             chord_unknown, set_chord_unknown,
+            current_section_label, set_current_section_label,
+            next_section_label, set_next_section_label,
+            secs_until_next_section, set_secs_until_next_section,
         }
     }
 }
@@ -237,6 +252,10 @@ pub fn Visualization() -> impl IntoView {
     let (set_estimated_key_hue, set_next_key_hue, set_chord_completion, set_vocals_available, set_chord_unknown) = (
         viz_ctx.set_estimated_key_hue, viz_ctx.set_next_key_hue,
         viz_ctx.set_chord_completion, viz_ctx.set_vocals_available, viz_ctx.set_chord_unknown,
+    );
+    let (set_current_section_label, set_next_section_label, set_secs_until_next_section) = (
+        viz_ctx.set_current_section_label, viz_ctx.set_next_section_label,
+        viz_ctx.set_secs_until_next_section,
     );
     let key_hue_timeline = viz_ctx.key_hue_timeline;
 
@@ -325,14 +344,25 @@ pub fn Visualization() -> impl IntoView {
             set_downbeat_trigger.update(|v| *v = v.wrapping_add(1));
         }
 
-        // Section change → energy / density
-        if let Some(seg) = track.segments.iter().find(|s| t >= s.start && t < s.end) {
+        // Section change → energy / density / セクション遷移情報
+        if let Some(idx) = track.segments.iter().position(|s| t >= s.start && t < s.end) {
+            let seg = &track.segments[idx];
+            let next_label = track.segments.get(idx + 1)
+                .map(|s| s.label.clone())
+                .unwrap_or_default();
+            let secs_until = (seg.end - t).max(0.0);
+
             if seg.label != prev_segment_label.get_value() {
                 prev_segment_label.set_value(seg.label.clone());
+                set_current_section_label.set(seg.label.clone());
                 let (e, d) = section_energy(&seg.label);
                 set_energy.set(e.min(1.0));
                 set_density.set(d);
             }
+
+            // 次セクション・残り時間は毎 tick 更新（タイミング演出に使うため）
+            set_next_section_label.set(next_label);
+            set_secs_until_next_section.set(secs_until);
         }
 
         // Chord change → hue / key estimation（N 判定ベース）
@@ -402,7 +432,11 @@ pub fn Visualization() -> impl IntoView {
                         let t2 = track.clone();
                         view! {
                             <Player track=track.clone() active_page="visualization" />
-                            <Timeline track=t2 />
+                            <Timeline
+                                track=t2
+                                stem=stem()
+                                on_updated=Callback::new(move |_| { track_data.refetch(); })
+                            />
                             <div class="flex flex-1 min-h-0">
                                 <div class="flex-1 min-w-0">
                                     <VizCanvas />

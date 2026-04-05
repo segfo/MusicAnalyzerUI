@@ -61,6 +61,22 @@ async fn http_get_json<T: for<'de> serde::Deserialize<'de>>(url: &str) -> Result
     resp.json::<T>().await.map_err(|e| e.to_string())
 }
 
+async fn http_post_json<T: for<'de> serde::Deserialize<'de>>(
+    url: &str,
+    body: &impl serde::Serialize,
+) -> Result<T, String> {
+    let resp = gloo_net::http::Request::post(url)
+        .json(body)
+        .map_err(|e| e.to_string())?
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !resp.ok() {
+        return Err(format!("HTTP {}", resp.status()));
+    }
+    resp.json::<T>().await.map_err(|e| e.to_string())
+}
+
 async fn fetch_binary_url(url: &str) -> Result<js_sys::ArrayBuffer, String> {
     let bytes = gloo_net::http::Request::get(url)
         .send()
@@ -175,4 +191,56 @@ pub async fn set_base_dir(path: &str) -> Result<(), String> {
     let args = serde_wasm_bindgen::to_value(&serde_json::json!({ "path": path }))
         .map_err(|e| e.to_string())?;
     tauri_invoke("set_base_dir", args).await
+}
+
+/// セグメントのラベルを更新してオーバーライドJSONに保存する
+pub async fn update_segment_label(stem: &str, segment_index: u32, new_label: &str) -> Result<(), String> {
+    let cfg = config::get_config();
+    match config::effective_mode(&cfg) {
+        BackendMode::Tauri => {
+            let args = serde_wasm_bindgen::to_value(&serde_json::json!({
+                "stem": stem,
+                "segmentIndex": segment_index,
+                "newLabel": new_label,
+            }))
+            .map_err(|e| e.to_string())?;
+            tauri_invoke("update_segment_label", args).await
+        }
+        BackendMode::Http => {
+            #[derive(serde::Serialize)]
+            struct Body<'a> { stem: &'a str, segment_index: u32, new_label: &'a str }
+            #[derive(serde::Deserialize)]
+            struct Resp { ok: bool }
+            let resp: Resp = http_post_json(
+                &http_url(&cfg, "/segments/update"),
+                &Body { stem, segment_index, new_label },
+            ).await?;
+            if resp.ok { Ok(()) } else { Err("update_segment_label failed".into()) }
+        }
+        BackendMode::Auto => unreachable!(),
+    }
+}
+
+/// 最後のセグメントラベル変更を元に戻す。変更があれば true、履歴が空なら false を返す
+pub async fn undo_segment_label(stem: &str) -> Result<bool, String> {
+    let cfg = config::get_config();
+    match config::effective_mode(&cfg) {
+        BackendMode::Tauri => {
+            let args = serde_wasm_bindgen::to_value(&serde_json::json!({ "stem": stem }))
+                .map_err(|e| e.to_string())?;
+            tauri_invoke("undo_segment_label", args).await
+        }
+        BackendMode::Http => {
+            #[derive(serde::Serialize)]
+            struct Body<'a> { stem: &'a str }
+            #[derive(serde::Deserialize)]
+            struct Resp { undone: bool }
+            let resp: Resp = http_post_json(
+                &http_url(&cfg, "/segments/undo"),
+                &Body { stem },
+            ).await?;
+            Ok(resp.undone)
+        }
+        BackendMode::Auto => unreachable!(),
+    }
 }

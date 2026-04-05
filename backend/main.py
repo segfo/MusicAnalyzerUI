@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import json
 import re
 import sys
+import time
 from pathlib import Path
 
 # Allow importing project-level schema.py
@@ -10,7 +12,7 @@ sys.path.insert(0, str(Path(__file__).parents[2]))  # MusicAnalyzer root
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Optional
 
 from music_analyzer.schema import TrackDataset
@@ -27,13 +29,14 @@ app.add_middleware(
         "https://tauri.localhost",
     ],
     allow_credentials=True,
-    allow_methods=["GET"],
+    allow_methods=["GET", "POST", "PATCH"],
     allow_headers=["*"],
 )
 
 BASE_DIR = Path(__file__).parents[2]  # MusicAnalyzer/
 OUTPUT_DIR = BASE_DIR / "output"
 OUTPUT_JA_DIR = BASE_DIR / "output_ja"
+OVERRIDES_DIR = OUTPUT_DIR / "overrides"
 MUSIC_DIR = BASE_DIR / "music"
 STEMS_DIR = MUSIC_DIR / "stems"  # music/stems/{stem}/{track}.{ext}
 
@@ -49,6 +52,59 @@ MEDIA_TYPES = {
     ".m4a": "audio/mp4",
 }
 
+
+# ── Segment overrides (編集履歴・ユーザー上書き) ───────────────────────��─────
+
+class HistoryEntry(BaseModel):
+    timestamp: str
+    segment_index: int
+    old_label: str
+    new_label: str
+
+
+class SegmentOverrides(BaseModel):
+    stem: str = ""
+    updated_at: str = ""
+    history: list[HistoryEntry] = Field(default_factory=list)
+    current_overrides: dict[str, str] = Field(default_factory=dict)
+
+
+def _overrides_path(stem: str) -> Path:
+    return OVERRIDES_DIR / f"{stem}_overrides.json"
+
+
+def _load_overrides(stem: str) -> SegmentOverrides:
+    path = _overrides_path(stem)
+    if path.exists():
+        try:
+            return SegmentOverrides.model_validate_json(path.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    return SegmentOverrides(stem=stem)
+
+
+def _save_overrides(stem: str, overrides: SegmentOverrides) -> None:
+    OVERRIDES_DIR.mkdir(parents=True, exist_ok=True)
+    _overrides_path(stem).write_text(
+        overrides.model_dump_json(indent=2), encoding="utf-8"
+    )
+
+
+def _now_timestamp() -> str:
+    return str(int(time.time()))
+
+
+def _apply_overrides(track: TrackDataset, overrides: SegmentOverrides) -> TrackDataset:
+    if not overrides.current_overrides:
+        return track
+    for seg in track.segments:
+        key = str(seg.index)
+        if key in overrides.current_overrides:
+            seg.label = overrides.current_overrides[key]
+    return track
+
+
+# ── Audio helpers ───────────────────────────��───────────────────��─────────────
 
 def _find_audio_in_music_dir(stem: str) -> Optional[Path]:
     for ext in AUDIO_EXTS:
@@ -73,7 +129,9 @@ def _load_track(stem: str) -> TrackDataset:
     json_file = _resolve_json(stem)
     if json_file is None:
         raise HTTPException(status_code=404, detail=f"Track not found: {stem}")
-    return TrackDataset.load_json(json_file)
+    track = TrackDataset.load_json(json_file)
+    overrides = _load_overrides(stem)
+    return _apply_overrides(track, overrides)
 
 
 class TrackSummary(BaseModel):
@@ -86,8 +144,13 @@ class TrackSummary(BaseModel):
 
 @app.get("/api/tracks", response_model=list[TrackSummary])
 def list_tracks():
-    # output/ にある stem を基準に列挙し、各 stem で _ja.json を優先して読む
-    stems = sorted(p.stem for p in OUTPUT_DIR.glob("*.json"))
+    # music/ の音声ファイル名（拡張子なし）をステムとして列挙する。
+    # output/*.json を列挙すると "ユカリ戦 copy.json" のような不要ファイルが混入するため。
+    stems = sorted(
+        p.stem
+        for p in MUSIC_DIR.iterdir()
+        if p.suffix.lower() in AUDIO_EXTS and _resolve_json(p.stem) is not None
+    )
     results = []
     for stem in stems:
         try:
@@ -246,6 +309,69 @@ def get_stem_availability(stem: str):
         bass=_find_stem_file(stem, "bass") is not None,
         other=_find_stem_file(stem, "other") is not None,
     )
+
+
+# ── Segment label overrides ──────────────────���────────────────────────────────
+
+class UpdateSegmentRequest(BaseModel):
+    stem: str
+    segment_index: int
+    new_label: str
+
+
+class UndoRequest(BaseModel):
+    stem: str
+
+
+@app.post("/api/segments/update")
+def update_segment_label(body: UpdateSegmentRequest) -> dict:
+    """セグメントのラベルを更新してオーバーライドJSONに保存する。"""
+    # 現在のラベル（既存override または ベースJSON）を取得
+    overrides = _load_overrides(body.stem)
+    key = str(body.segment_index)
+
+    if key in overrides.current_overrides:
+        old_label = overrides.current_overrides[key]
+    else:
+        json_file = _resolve_json(body.stem)
+        if json_file is None:
+            raise HTTPException(status_code=404, detail=f"Track not found: {body.stem}")
+        base_track = TrackDataset.load_json(json_file)
+        seg = next((s for s in base_track.segments if s.index == body.segment_index), None)
+        old_label = seg.label if seg else ""
+
+    overrides.stem = body.stem
+    overrides.updated_at = _now_timestamp()
+    overrides.history.append(HistoryEntry(
+        timestamp=_now_timestamp(),
+        segment_index=body.segment_index,
+        old_label=old_label,
+        new_label=body.new_label,
+    ))
+    overrides.current_overrides[key] = body.new_label
+
+    _save_overrides(body.stem, overrides)
+    return {"ok": True}
+
+
+@app.post("/api/segments/undo")
+def undo_segment_label(body: UndoRequest) -> dict:
+    """最後のセグメントラベル変更を元に戻す。変更があれば undone=true を返す。"""
+    overrides = _load_overrides(body.stem)
+    if not overrides.history:
+        return {"undone": False}
+
+    overrides.history.pop()
+    overrides.updated_at = _now_timestamp()
+
+    # current_overrides を履歴から再構築
+    rebuilt: dict[str, str] = {}
+    for entry in overrides.history:
+        rebuilt[str(entry.segment_index)] = entry.new_label
+    overrides.current_overrides = rebuilt
+
+    _save_overrides(body.stem, overrides)
+    return {"undone": True}
 
 
 if __name__ == "__main__":

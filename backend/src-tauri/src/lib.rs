@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Mutex;
 use tauri::{AppHandle, Manager, State};
@@ -101,6 +102,65 @@ pub struct StemAvailability {
     pub drums: bool,
     pub bass: bool,
     pub other: bool,
+}
+
+// ── Segment overrides (編集履歴・ユーザー上書き) ─────────────────────────────
+
+#[derive(serde::Serialize, serde::Deserialize, Clone)]
+struct HistoryEntry {
+    timestamp: String,
+    segment_index: i64,
+    old_label: String,
+    new_label: String,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Default)]
+struct SegmentOverrides {
+    stem: String,
+    updated_at: String,
+    #[serde(default)]
+    history: Vec<HistoryEntry>,
+    #[serde(default)]
+    current_overrides: HashMap<String, String>,
+}
+
+fn resolve_overrides_path(base_dir: &PathBuf, stem: &str) -> PathBuf {
+    base_dir
+        .join("output")
+        .join("overrides")
+        .join(format!("{}_overrides.json", stem))
+}
+
+fn load_overrides(base_dir: &PathBuf, stem: &str) -> SegmentOverrides {
+    let path = resolve_overrides_path(base_dir, stem);
+    std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|data| serde_json::from_str(&data).ok())
+        .unwrap_or_else(|| SegmentOverrides {
+            stem: stem.to_string(),
+            updated_at: String::new(),
+            history: Vec::new(),
+            current_overrides: HashMap::new(),
+        })
+}
+
+fn save_overrides(base_dir: &PathBuf, stem: &str, overrides: &SegmentOverrides) -> Result<(), String> {
+    let path = resolve_overrides_path(base_dir, stem);
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    }
+    let data = serde_json::to_string_pretty(overrides).map_err(|e| e.to_string())?;
+    std::fs::write(path, data).map_err(|e| e.to_string())
+}
+
+fn now_timestamp() -> String {
+    // JS-interop なしの簡易タイムスタンプ（UNIX秒）
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    format!("{}", secs)
 }
 
 // ── App state ────────────────────────────────────────────────────────────────
@@ -216,18 +276,27 @@ fn list_tracks(state: State<AppState>) -> Result<Vec<TrackSummary>, String> {
         .as_ref()
         .ok_or("Base directory not configured. Call set_base_dir first.")?;
 
-    let output_dir = base_dir.join("output");
-    if !output_dir.exists() {
+    // music/ ディレクトリの音声ファイル名（拡張子なし）をステムとして列挙する。
+    // output/*.json を列挙すると "ユカリ戦 copy.json" のような不要ファイルが混入するため。
+    let music_dir = base_dir.join("music");
+    if !music_dir.exists() {
         return Ok(vec![]);
     }
 
-    let mut stems: Vec<String> = std::fs::read_dir(&output_dir)
+    let mut stems: Vec<String> = std::fs::read_dir(&music_dir)
         .map_err(|e| e.to_string())?
         .filter_map(|e| e.ok())
         .filter_map(|e| {
             let name = e.file_name().to_string_lossy().into_owned();
-            name.strip_suffix(".json").map(|s| s.to_string())
+            for ext in AUDIO_EXTS {
+                if name.to_lowercase().ends_with(ext) {
+                    let stem = name[..name.len() - ext.len()].to_string();
+                    return Some(stem);
+                }
+            }
+            None
         })
+        .filter(|stem| resolve_json(base_dir, stem).is_some())
         .collect();
     stems.sort();
 
@@ -258,7 +327,7 @@ fn list_tracks(state: State<AppState>) -> Result<Vec<TrackSummary>, String> {
     Ok(results)
 }
 
-/// 指定 stem の TrackDataset JSON を返す
+/// 指定 stem の TrackDataset JSON を返す（ユーザー上書きを適用済み）
 #[tauri::command]
 fn get_track(stem: String, state: State<AppState>) -> Result<TrackDataset, String> {
     let guard = state.base_dir.lock().map_err(|e| e.to_string())?;
@@ -268,7 +337,19 @@ fn get_track(stem: String, state: State<AppState>) -> Result<TrackDataset, Strin
     let json_file = resolve_json(base_dir, &stem)
         .ok_or_else(|| format!("Track not found: {}", stem))?;
     let data = std::fs::read_to_string(&json_file).map_err(|e| e.to_string())?;
-    serde_json::from_str(&data).map_err(|e| e.to_string())
+    let mut track: TrackDataset = serde_json::from_str(&data).map_err(|e| e.to_string())?;
+
+    // ユーザー編集のオーバーライドを適用
+    let overrides = load_overrides(base_dir, &stem);
+    if !overrides.current_overrides.is_empty() {
+        for seg in &mut track.segments {
+            if let Some(new_label) = overrides.current_overrides.get(&seg.index.to_string()) {
+                seg.label = new_label.clone();
+            }
+        }
+    }
+
+    Ok(track)
 }
 
 /// ステムファイル (vocals/drums/bass/other) の存在チェック
@@ -311,6 +392,72 @@ fn get_audio_path(stem: String, state: State<AppState>) -> Result<Option<String>
     }
 
     Ok(None)
+}
+
+/// セグメントのラベルを更新してオーバーライドJSONに保存する
+#[tauri::command]
+fn update_segment_label(
+    stem: String,
+    segment_index: i64,
+    new_label: String,
+    state: State<AppState>,
+) -> Result<(), String> {
+    let guard = state.base_dir.lock().map_err(|e| e.to_string())?;
+    let base_dir = guard.as_ref().ok_or("Base directory not configured.")?;
+
+    // 現在のラベル（既存overrideまたはベースJSON）を取得
+    let mut overrides = load_overrides(base_dir, &stem);
+    let old_label = if let Some(lbl) = overrides.current_overrides.get(&segment_index.to_string()) {
+        lbl.clone()
+    } else {
+        // ベースJSONから取得
+        let json_file = resolve_json(base_dir, &stem)
+            .ok_or_else(|| format!("Track not found: {}", stem))?;
+        let data = std::fs::read_to_string(&json_file).map_err(|e| e.to_string())?;
+        let track: TrackDataset = serde_json::from_str(&data).map_err(|e| e.to_string())?;
+        track.segments
+            .iter()
+            .find(|s| s.index == segment_index)
+            .map(|s| s.label.clone())
+            .unwrap_or_default()
+    };
+
+    overrides.stem = stem.clone();
+    overrides.updated_at = now_timestamp();
+    overrides.history.push(HistoryEntry {
+        timestamp: now_timestamp(),
+        segment_index,
+        old_label,
+        new_label: new_label.clone(),
+    });
+    overrides.current_overrides.insert(segment_index.to_string(), new_label);
+
+    save_overrides(base_dir, &stem, &overrides)
+}
+
+/// 最後のセグメントラベル変更を元に戻す。変更があれば true、履歴が空なら false を返す
+#[tauri::command]
+fn undo_segment_label(stem: String, state: State<AppState>) -> Result<bool, String> {
+    let guard = state.base_dir.lock().map_err(|e| e.to_string())?;
+    let base_dir = guard.as_ref().ok_or("Base directory not configured.")?;
+
+    let mut overrides = load_overrides(base_dir, &stem);
+    if overrides.history.is_empty() {
+        return Ok(false);
+    }
+
+    overrides.history.pop();
+    overrides.updated_at = now_timestamp();
+
+    // current_overrides を履歴から再構築
+    let mut rebuilt: HashMap<String, String> = HashMap::new();
+    for entry in &overrides.history {
+        rebuilt.insert(entry.segment_index.to_string(), entry.new_label.clone());
+    }
+    overrides.current_overrides = rebuilt;
+
+    save_overrides(base_dir, &stem, &overrides)?;
+    Ok(true)
 }
 
 /// ステム音声ファイルの絶対パスを返す (asset:// URL変換用)
@@ -369,6 +516,8 @@ pub fn run() {
             get_stem_availability,
             get_audio_path,
             get_stem_path,
+            update_segment_label,
+            undo_segment_label,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

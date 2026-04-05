@@ -130,7 +130,11 @@ pub fn Analysis() -> impl IntoView {
                                 <Player track=track_for_player active_page="analysis" />
 
                                 // Timeline (directly below player)
-                                <Timeline track=track_for_timeline />
+                                <Timeline
+                                    track=track_for_timeline
+                                    stem=stem()
+                                    on_updated=Callback::new(move |_| { track_data.refetch(); })
+                                />
 
                                 // Main content + sidebar
                                 <div id="section-card-container" class="relative flex flex-1 min-h-0 overflow-hidden">

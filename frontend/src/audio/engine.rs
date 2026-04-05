@@ -171,6 +171,7 @@ pub struct StemAudioEngine {
     gains: [GainNode; 4],
     state: Rc<RefCell<StemEngineState>>,
     analyser: Option<AnalyserNode>,
+    mix_analyser: Option<AnalyserNode>,
 }
 
 struct StemEngineState {
@@ -190,6 +191,14 @@ impl StemAudioEngine {
             let _ = gains[0].connect_with_audio_node(&a);
             a
         });
+        // 全ステムのミックス RMS 計測用 AnalyserNode（各 GainNode からファンイン）
+        let mix_analyser = ctx.create_analyser().ok().map(|a| {
+            a.set_fft_size(2048);
+            for g in &gains {
+                let _ = g.connect_with_audio_node(&a);
+            }
+            a
+        });
         Self {
             ctx,
             buffers: Rc::new(buffers),
@@ -202,6 +211,7 @@ impl StemAudioEngine {
                 duration,
             })),
             analyser,
+            mix_analyser,
         }
     }
 
@@ -212,6 +222,16 @@ impl StemAudioEngine {
         let len = analyser.fft_size() as usize;
         let mut buf = vec![0.0f32; len];
         analyser.get_float_time_domain_data(&mut buf);
+        Some(buf)
+    }
+
+    /// 全ステムのミックス時間領域データを取得する（RMS 計算用）。
+    /// mix_analyser が存在しない場合は None を返す。
+    pub fn get_mix_time_domain_data(&self) -> Option<Vec<f32>> {
+        let a = self.mix_analyser.as_ref()?;
+        let len = a.fft_size() as usize;
+        let mut buf = vec![0.0f32; len];
+        a.get_float_time_domain_data(&mut buf);
         Some(buf)
     }
 
